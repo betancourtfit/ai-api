@@ -21,4 +21,4 @@ ENV PORT=3001
 EXPOSE 3001
 
 # Comando de arranque (usa tu script start)
-CMD ["bun", "run", "start"]
+CMD ["bun", "index.ts"]
