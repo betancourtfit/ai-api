@@ -15,10 +15,10 @@ COPY . .
 
 # Variables de entorno
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=3001
 
 # Exponemos el puerto que usa Bun.serve
-EXPOSE 3000
+EXPOSE 3001
 
 # Comando de arranque (usa tu script start)
 CMD ["bun", "run", "start"]
