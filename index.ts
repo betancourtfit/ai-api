@@ -20,6 +20,12 @@ const server = Bun.serve({
   async fetch(request) {
     const { pathname } = new URL(request.url);
 
+
+    // healthcheck para EasyPanel / reverse proxies
+    if (request.method === "GET" && (pathname === "/" || pathname === "/health")) {
+        return new Response("ok", { status: 200 });
+      }
+
     if (request.method === "POST" && pathname === "/chat") {
         const { messages } = await request.json() as { messages: ChatMessage[] };
         const service = getNextService();
