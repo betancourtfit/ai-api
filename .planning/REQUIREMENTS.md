@@ -143,17 +143,90 @@
 
 ## Traceability
 
-*(Populated during roadmap creation)*
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| — | — | Pending |
+| INFRA-01 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Pending |
+| INFRA-04 | Phase 1 | Pending |
+| INFRA-05 | Phase 1 | Pending |
+| AUTH-01 | Phase 1 | Pending |
+| AUTH-02 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Pending |
+| AUTH-04 | Phase 1 | Pending |
+| EP-04 | Phase 1 | Pending |
+| EP-07 | Phase 1 | Pending |
+| VALID-01 | Phase 1 | Pending |
+| VALID-02 | Phase 1 | Pending |
+| VALID-03 | Phase 1 | Pending |
+| VALID-04 | Phase 1 | Pending |
+| VALID-05 | Phase 1 | Pending |
+| VALID-06 | Phase 1 | Pending |
+| VALID-07 | Phase 1 | Pending |
+| REG-01 | Phase 1 | Pending |
+| REG-02 | Phase 1 | Pending |
+| REG-03 | Phase 1 | Pending |
+| REG-04 | Phase 1 | Pending |
+| ROUTE-01 | Phase 2 | Pending |
+| ROUTE-02 | Phase 2 | Pending |
+| ROUTE-03 | Phase 2 | Pending |
+| ROUTE-04 | Phase 2 | Pending |
+| ROUTE-05 | Phase 2 | Pending |
+| ROUTE-06 | Phase 2 | Pending |
+| ROUTE-07 | Phase 2 | Pending |
+| ROUTE-08 | Phase 2 | Pending |
+| RL-01 | Phase 2 | Pending |
+| RL-02 | Phase 2 | Pending |
+| RL-03 | Phase 2 | Pending |
+| RL-04 | Phase 2 | Pending |
+| RL-05 | Phase 2 | Pending |
+| RL-06 | Phase 2 | Pending |
+| RL-07 | Phase 2 | Pending |
+| STREAM-01 | Phase 2 | Pending |
+| STREAM-02 | Phase 2 | Pending |
+| STREAM-03 | Phase 2 | Pending |
+| STREAM-04 | Phase 2 | Pending |
+| STREAM-05 | Phase 2 | Pending |
+| STREAM-06 | Phase 2 | Pending |
+| STREAM-07 | Phase 2 | Pending |
+| EP-01 | Phase 2 | Pending |
+| EP-02 | Phase 2 | Pending |
+| EP-03 | Phase 2 | Pending |
+| EP-05 | Phase 2 | Pending |
+| EP-06 | Phase 2 | Pending |
+| NORM-01 | Phase 3 | Pending |
+| NORM-02 | Phase 3 | Pending |
+| NORM-03 | Phase 3 | Pending |
+| NORM-04 | Phase 3 | Pending |
+| NORM-05 | Phase 3 | Pending |
+| NORM-06 | Phase 3 | Pending |
+| NORM-07 | Phase 3 | Pending |
+| NORM-08 | Phase 3 | Pending |
+| NORM-09 | Phase 3 | Pending |
+| NORM-10 | Phase 3 | Pending |
+| OBS-01 | Phase 3 | Pending |
+| OBS-02 | Phase 3 | Pending |
+| OBS-03 | Phase 3 | Pending |
+| OBS-04 | Phase 3 | Pending |
+| OBS-05 | Phase 3 | Pending |
+| TEST-01 | Phase 3 | Pending |
+| TEST-02 | Phase 3 | Pending |
+| TEST-03 | Phase 3 | Pending |
+| TEST-04 | Phase 3 | Pending |
+| TEST-05 | Phase 3 | Pending |
+| TEST-06 | Phase 3 | Pending |
+| TEST-07 | Phase 3 | Pending |
+| TEST-08 | Phase 3 | Pending |
+| TEST-09 | Phase 3 | Pending |
+| TEST-10 | Phase 3 | Pending |
+| TEST-11 | Phase 3 | Pending |
+| TEST-12 | Phase 3 | Pending |
 
 **Coverage:**
-- v1 requirements: 56 total
-- Mapped to phases: 0
-- Unmapped: 56 ⚠️
+- v1 requirements: 76 total (file header said 56 — body count is authoritative)
+- Mapped to phases: 76
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-06-04*
-*Last updated: 2026-06-04 after initial definition*
+*Last updated: 2026-06-04 after roadmap creation — traceability populated*
