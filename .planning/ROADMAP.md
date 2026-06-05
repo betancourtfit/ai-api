@@ -71,7 +71,7 @@ Plans:
   3. `bun test` reports all 12 test cases passing, including round-robin alternation, cooldown, recovery, failover, exhaustion, auth rejection, alias rejection, field rejection, non-streaming shape, streaming format, model rewrite, and state reset.
   4. Error responses at every error path return `{ "error": { "message", "type", "code", "param" } }` — never a flat body.
 
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 Plans:
 
 **Wave 1**
@@ -80,7 +80,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-02-PLAN.md — createServer factory, X-Request-ID everywhere, NORM-10 error sweep + D-07 passthrough, structured logging (OBS-01..05)
+- [x] 03-02-PLAN.md — createServer factory, X-Request-ID everywhere, NORM-10 error sweep + D-07 passthrough, structured logging (OBS-01..05)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -94,7 +94,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete    | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete    | 2026-06-05 |
-| 3. Full Compliance + Tests | 1/3 | In Progress|  |
+| 3. Full Compliance + Tests | 2/3 | In Progress|  |
 
 ---
 
