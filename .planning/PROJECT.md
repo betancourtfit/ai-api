@@ -16,25 +16,21 @@ Drop-in OpenAI replacement: any fetch already wired to OpenAI works unchanged af
 - ✓ Streaming SSE responses from providers — existing
 - ✓ Provider SDK integration (groq-sdk, cerebras_cloud_sdk) — existing
 - ✓ Basic liveness endpoint (`/health`) — existing
+- ✓ Bearer auth middleware — 401 on missing/invalid credentials — Validated in Phase 1: Foundation
+- ✓ Constant-time key comparison; secrets never logged — Validated in Phase 1: Foundation
+- ✓ `POST /v1/chat/completions` — OpenAI wire-compatible, non-streaming (live-tested via Cerebras) — Validated in Phase 1: Foundation
+- ✓ `GET /v1/models` — returns logical proxy aliases only — Validated in Phase 1: Foundation (delivered early; EP-03 was Phase 2)
+- ✓ Allowlist-based field validation (Cerebras + Groq intersection) — Validated in Phase 1: Foundation
+- ✓ Reject `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`, `n != 1` — Validated in Phase 1: Foundation
+- ✓ Logical model alias resolution (`gpt-oss-120b-balanced` → provider-specific ID) — Validated in Phase 1: Foundation
+- ✓ Return 400 for unknown logical aliases — Validated in Phase 1: Foundation
 
 ### Active
 
-**Authentication & Security**
-- [ ] Bearer auth middleware — reject missing/invalid credentials with 401
-- [ ] Constant-time key comparison; never log secrets or Authorization headers
-
 **OpenAI-Compatible Endpoints**
-- [ ] `POST /v1/chat/completions` — OpenAI wire-compatible, non-streaming
 - [ ] `POST /v1/chat/completions` — streaming (SSE relay, `Content-Type: text/event-stream`)
-- [ ] `GET /v1/models` — returns logical proxy aliases only (not raw provider model IDs)
 - [ ] `GET /ready` — readiness check supporting degraded mode (one provider down)
 - [ ] `GET /internal/providers/status` — protected diagnostics endpoint (optional, behind same auth)
-
-**Request Contract**
-- [ ] Allowlist-based field validation (intersection of Cerebras + Groq capabilities)
-- [ ] Reject `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`, `n != 1`
-- [ ] Logical model alias resolution (`gpt-oss-120b-balanced` → provider-specific ID)
-- [ ] Return 400 for unknown logical aliases
 
 **Routing & State**
 - [ ] Stateful round-robin among currently eligible providers (not blind alternation)
@@ -129,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-04 after initialization*
+*Last updated: 2026-06-05 after Phase 1 (Foundation) completion*
