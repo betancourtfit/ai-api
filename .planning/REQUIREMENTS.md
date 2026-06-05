@@ -80,39 +80,39 @@
 
 ### Response Normalization
 
-- [ ] **NORM-01**: `model` field rewritten to logical proxy alias in non-streaming responses
-- [ ] **NORM-02**: `model` field rewritten to logical proxy alias in every streaming chunk
-- [ ] **NORM-03**: Cerebras `choices[*].message.reasoning` stripped from non-streaming responses
-- [ ] **NORM-04**: Cerebras `choices[*].reasoning_logprobs` stripped
-- [ ] **NORM-05**: Cerebras `time_info` top-level field stripped
-- [ ] **NORM-06**: Cerebras `delta.reasoning` stripped from streaming chunks
-- [ ] **NORM-07**: Groq provider-specific fields stripped (`x_groq`, `usage_breakdown`)
-- [ ] **NORM-08**: `usage` present in non-streaming responses (`prompt_tokens`, `completion_tokens`, `total_tokens`)
-- [ ] **NORM-09**: `object` field exact: `"chat.completion"` non-streaming, `"chat.completion.chunk"` streaming
-- [ ] **NORM-10**: Error responses always shaped as `{ "error": { "message", "type", "code", "param" } }` — never flat
+- [x] **NORM-01**: `model` field rewritten to logical proxy alias in non-streaming responses
+- [x] **NORM-02**: `model` field rewritten to logical proxy alias in every streaming chunk
+- [x] **NORM-03**: Cerebras `choices[*].message.reasoning` stripped from non-streaming responses
+- [x] **NORM-04**: Cerebras `choices[*].reasoning_logprobs` stripped
+- [x] **NORM-05**: Cerebras `time_info` top-level field stripped
+- [x] **NORM-06**: Cerebras `delta.reasoning` stripped from streaming chunks
+- [x] **NORM-07**: Groq provider-specific fields stripped (`x_groq`, `usage_breakdown`)
+- [x] **NORM-08**: `usage` present in non-streaming responses (`prompt_tokens`, `completion_tokens`, `total_tokens`)
+- [x] **NORM-09**: `object` field exact: `"chat.completion"` non-streaming, `"chat.completion.chunk"` streaming
+- [x] **NORM-10**: Error responses always shaped as `{ "error": { "message", "type", "code", "param" } }` — never flat
 
 ### Observability
 
-- [ ] **OBS-01**: `X-Request-ID` header returned on every response (UUID generated per request)
-- [ ] **OBS-02**: Structured JSON log per request: request ID, timestamp, route, logical alias, chosen provider, upstream model ID, attempt number, streaming enabled, status code, latency, failover reason
-- [ ] **OBS-03**: Cooldown and failover events logged with provider and reason
-- [ ] **OBS-04**: API keys, Authorization headers, full prompts, full responses, reasoning content never logged
-- [ ] **OBS-05**: Optional `X-LLM-Provider` response header (controlled by `EXPOSE_PROVIDER_HEADER` env, default false)
+- [x] **OBS-01**: `X-Request-ID` header returned on every response (UUID generated per request)
+- [x] **OBS-02**: Structured JSON log per request: request ID, timestamp, route, logical alias, chosen provider, upstream model ID, attempt number, streaming enabled, status code, latency, failover reason
+- [x] **OBS-03**: Cooldown and failover events logged with provider and reason
+- [x] **OBS-04**: API keys, Authorization headers, full prompts, full responses, reasoning content never logged
+- [x] **OBS-05**: Optional `X-LLM-Provider` response header (controlled by `EXPOSE_PROVIDER_HEADER` env, default false)
 
 ### Tests
 
-- [ ] **TEST-01**: Alternating provider selection — consecutive requests alternate Cerebras/Groq
-- [ ] **TEST-02**: Cooldown behavior — 429 from provider triggers cooldown, subsequent requests go to alternate
-- [ ] **TEST-03**: Provider recovery — provider returns to rotation after cooldown expires
-- [ ] **TEST-04**: Failover on transient errors — 500/502/503/504 trigger failover to alternate
-- [ ] **TEST-05**: Both-provider exhaustion — returns 503 with OpenAI error body when no eligible provider
-- [ ] **TEST-06**: Invalid auth — missing or wrong key returns 401 with OpenAI error body
-- [ ] **TEST-07**: Unknown alias — unknown model name returns 400 with OpenAI error body
-- [ ] **TEST-08**: Unsupported field rejection — `logprobs`, `n=2`, `messages[].name` return 400
-- [ ] **TEST-09**: Non-streaming completion — end-to-end response shape validated (id, object, model, choices, usage)
-- [ ] **TEST-10**: Streaming relay — SSE format validated, `data: [DONE]` present, no buffering
-- [ ] **TEST-11**: Model field normalization — upstream provider model ID rewritten to logical alias in responses
-- [ ] **TEST-12**: Provider state reset between tests (`resetForTesting()` called in `beforeEach`)
+- [x] **TEST-01**: Alternating provider selection — consecutive requests alternate Cerebras/Groq
+- [x] **TEST-02**: Cooldown behavior — 429 from provider triggers cooldown, subsequent requests go to alternate
+- [x] **TEST-03**: Provider recovery — provider returns to rotation after cooldown expires
+- [x] **TEST-04**: Failover on transient errors — 500/502/503/504 trigger failover to alternate
+- [x] **TEST-05**: Both-provider exhaustion — returns 503 with OpenAI error body when no eligible provider
+- [x] **TEST-06**: Invalid auth — missing or wrong key returns 401 with OpenAI error body
+- [x] **TEST-07**: Unknown alias — unknown model name returns 400 with OpenAI error body
+- [x] **TEST-08**: Unsupported field rejection — `logprobs`, `n=2`, `messages[].name` return 400
+- [x] **TEST-09**: Non-streaming completion — end-to-end response shape validated (id, object, model, choices, usage)
+- [x] **TEST-10**: Streaming relay — SSE format validated, `data: [DONE]` present, no buffering
+- [x] **TEST-11**: Model field normalization — upstream provider model ID rewritten to logical alias in responses
+- [x] **TEST-12**: Provider state reset between tests (`resetForTesting()` called in `beforeEach`)
 
 ## v2 Requirements
 
@@ -194,33 +194,33 @@
 | EP-03 | Phase 2 | Complete |
 | EP-05 | Phase 2 | Complete |
 | EP-06 | Phase 2 | Complete |
-| NORM-01 | Phase 3 | Pending |
-| NORM-02 | Phase 3 | Pending |
-| NORM-03 | Phase 3 | Pending |
-| NORM-04 | Phase 3 | Pending |
-| NORM-05 | Phase 3 | Pending |
-| NORM-06 | Phase 3 | Pending |
-| NORM-07 | Phase 3 | Pending |
-| NORM-08 | Phase 3 | Pending |
-| NORM-09 | Phase 3 | Pending |
-| NORM-10 | Phase 3 | Pending |
-| OBS-01 | Phase 3 | Pending |
-| OBS-02 | Phase 3 | Pending |
-| OBS-03 | Phase 3 | Pending |
-| OBS-04 | Phase 3 | Pending |
-| OBS-05 | Phase 3 | Pending |
-| TEST-01 | Phase 3 | Pending |
-| TEST-02 | Phase 3 | Pending |
-| TEST-03 | Phase 3 | Pending |
-| TEST-04 | Phase 3 | Pending |
-| TEST-05 | Phase 3 | Pending |
-| TEST-06 | Phase 3 | Pending |
-| TEST-07 | Phase 3 | Pending |
-| TEST-08 | Phase 3 | Pending |
-| TEST-09 | Phase 3 | Pending |
-| TEST-10 | Phase 3 | Pending |
-| TEST-11 | Phase 3 | Pending |
-| TEST-12 | Phase 3 | Pending |
+| NORM-01 | Phase 3 | Complete |
+| NORM-02 | Phase 3 | Complete |
+| NORM-03 | Phase 3 | Complete |
+| NORM-04 | Phase 3 | Complete |
+| NORM-05 | Phase 3 | Complete |
+| NORM-06 | Phase 3 | Complete |
+| NORM-07 | Phase 3 | Complete |
+| NORM-08 | Phase 3 | Complete |
+| NORM-09 | Phase 3 | Complete |
+| NORM-10 | Phase 3 | Complete |
+| OBS-01 | Phase 3 | Complete |
+| OBS-02 | Phase 3 | Complete |
+| OBS-03 | Phase 3 | Complete |
+| OBS-04 | Phase 3 | Complete |
+| OBS-05 | Phase 3 | Complete |
+| TEST-01 | Phase 3 | Complete |
+| TEST-02 | Phase 3 | Complete |
+| TEST-03 | Phase 3 | Complete |
+| TEST-04 | Phase 3 | Complete |
+| TEST-05 | Phase 3 | Complete |
+| TEST-06 | Phase 3 | Complete |
+| TEST-07 | Phase 3 | Complete |
+| TEST-08 | Phase 3 | Complete |
+| TEST-09 | Phase 3 | Complete |
+| TEST-10 | Phase 3 | Complete |
+| TEST-11 | Phase 3 | Complete |
+| TEST-12 | Phase 3 | Complete |
 | EXT-01 | v2 | Pending |
 | EXT-02 | v2 | Pending |
 | EXT-03 | v2 | Pending |
