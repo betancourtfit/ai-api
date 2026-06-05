@@ -824,19 +824,22 @@ return new Response(
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `services/` directory be kept or files moved to root?**
+   - RESOLVED: in-place rewrite of `services/cerebras.ts` + `services/groq.ts` per D-03 (flat root structure; adapters stay in `services/`). Minimizes git diff and preserves the existing import convention.
    - What we know: D-03 says root-level; existing code uses `services/` directory.
    - What's unclear: Whether to rename adapters to `groq-adapter.ts` at root, or replace `services/groq.ts` in-place.
    - Recommendation: Replace in-place (`services/groq.ts` → rewritten non-streaming adapter) to minimize git diff. Planner decides based on D-03 discretion.
 
 2. **Should Phase 1 include `GET /v1/models` (EP-03) or only the endpoints listed in CONTEXT.md phase boundary?**
+   - RESOLVED: included in Phase 1 via REG-04 in Plan 01-02 per CONTEXT.md phase boundary (returns logical aliases only). EP-03 in REQUIREMENTS.md was mis-assigned to Phase 2.
    - What we know: CONTEXT.md phase boundary explicitly includes `GET /v1/models`. REQUIREMENTS.md shows EP-03 as Phase 2.
    - What's unclear: This is a conflict between CONTEXT.md boundary description and REQUIREMENTS.md traceability table.
    - Recommendation: Follow CONTEXT.md (more specific, written after REQUIREMENTS.md) — include `GET /v1/models` in Phase 1. EP-03 in REQUIREMENTS.md was likely mis-assigned.
 
 3. **Should `stream: true` requests be rejected in Phase 1 validation, or silently accepted and queued for Phase 2?**
+   - RESOLVED: rejected with `400` (`param: "stream"`) via `z.literal(false).optional()` per D-02. Streaming is deferred entirely to Phase 2; clients get an honest, actionable error.
    - What we know: D-02 defers streaming to Phase 2. Validation schema uses `z.literal(false).optional()` which will reject `stream: true` with a 400.
    - What's unclear: Whether clients should receive an actionable error vs. silent omission.
    - Recommendation: Reject `stream: true` with `400` and `param: "stream"` and message "Streaming is not yet supported." This is honest and helps clients, and the Zod schema already handles it cleanly.
