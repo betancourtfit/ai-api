@@ -24,47 +24,25 @@ Drop-in OpenAI replacement: any fetch already wired to OpenAI works unchanged af
 - ✓ Reject `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`, `n != 1` — Validated in Phase 1: Foundation
 - ✓ Logical model alias resolution (`gpt-oss-120b-balanced` → provider-specific ID) — Validated in Phase 1: Foundation
 - ✓ Return 400 for unknown logical aliases — Validated in Phase 1: Foundation
+- ✓ `POST /v1/chat/completions` — streaming (SSE relay, `Content-Type: text/event-stream`) — Validated in Phase 2: Routing & Streaming
+- ✓ `GET /ready` — readiness check supporting degraded mode — Validated in Phase 2: Routing & Streaming
+- ✓ `GET /internal/providers/status` — protected diagnostics endpoint — Validated in Phase 2: Routing & Streaming
+- ✓ Stateful round-robin among currently eligible providers — Validated in Phase 2: Routing & Streaming
+- ✓ Provider eligibility: configured + enabled + not in cooldown + alias maps to provider — Validated in Phase 2: Routing & Streaming
+- ✓ Failover to alternate provider on 408, 429, 498, 500–504 — Validated in Phase 2: Routing & Streaming
+- ✓ No failover after first streaming chunk sent — Validated in Phase 2: Routing & Streaming
+- ✓ Parse Cerebras + Groq rate-limit headers, `retry-after` — Validated in Phase 2: Routing & Streaming
+- ✓ On 429: cooldown from reset headers, try alternate; recovery after expiry — Validated in Phase 2: Routing & Streaming
+- ✓ Rewrite `model` to logical alias; strip Cerebras `reasoning`/`reasoning_logprobs`/`time_info` and Groq telemetry (allowlist-rebuild normalizer) — Validated in Phase 3: Full Compliance + Tests
+- ✓ Optional `X-LLM-Provider` header (env-controlled, default off) — Validated in Phase 3: Full Compliance + Tests
+- ✓ Structured JSON logs per request: request ID, provider, latency, status, failover reason — Validated in Phase 3: Full Compliance + Tests
+- ✓ `X-Request-ID` response header (UUID) on every response — Validated in Phase 3: Full Compliance + Tests
+- ✓ Never log: API keys, Authorization headers, prompts, responses, reasoning — Validated in Phase 3: Full Compliance + Tests
+- ✓ Integration test suite (TEST-01..12): alternation, cooldown, recovery, failover, exhaustion, 401, 400, non-streaming + streaming end-to-end — Validated in Phase 3: Full Compliance + Tests
 
 ### Active
 
-**OpenAI-Compatible Endpoints**
-- [ ] `POST /v1/chat/completions` — streaming (SSE relay, `Content-Type: text/event-stream`)
-- [ ] `GET /ready` — readiness check supporting degraded mode (one provider down)
-- [ ] `GET /internal/providers/status` — protected diagnostics endpoint (optional, behind same auth)
-
-**Routing & State**
-- [ ] Stateful round-robin among currently eligible providers (not blind alternation)
-- [ ] Provider eligibility: configured + enabled + not in cooldown + alias maps to provider
-- [ ] Failover to alternate provider on 408, 429, 498, 500–504
-- [ ] No failover after first streaming chunk sent — preserve stream integrity
-
-**Rate-Limit & Cooldown**
-- [ ] Parse Cerebras rate-limit headers (day/minute limits)
-- [ ] Parse Groq rate-limit headers + `retry-after`
-- [ ] On 429: calculate cooldown from reset headers, mark provider unavailable, try alternate
-- [ ] Provider returns to rotation after cooldown expires
-
-**Response Normalization**
-- [ ] Rewrite `model` field to logical proxy alias in all responses
-- [ ] Strip Cerebras-specific fields: `choices[*].message.reasoning`, `choices[*].reasoning_logprobs`, `time_info`
-- [ ] Strip Groq provider-specific telemetry
-- [ ] Optional `X-LLM-Provider` header (env-controlled, default off)
-
-**Observability**
-- [ ] Structured JSON logs per request: request ID, provider chosen, latency, status, failover reason
-- [ ] Return `X-Request-ID` response header (UUID)
-- [ ] Never log: API keys, Authorization headers, full prompts, full responses, reasoning
-
-**Tests**
-- [ ] Alternating provider selection
-- [ ] Cooldown behavior after 429
-- [ ] Provider recovery after cooldown expires
-- [ ] Failover to alternate on transient errors
-- [ ] Both-provider exhaustion error
-- [ ] Invalid auth returns 401
-- [ ] Unknown alias returns 400
-- [ ] Non-streaming completion end-to-end
-- [ ] Streaming relay end-to-end
+(none — all v1 requirements validated; milestone ready for completion)
 
 ### Out of Scope
 
@@ -125,4 +103,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after Phase 1 (Foundation) completion*
+*Last updated: 2026-06-05 after Phase 3 (Full Compliance + Tests) completion — all v1 phases complete*
