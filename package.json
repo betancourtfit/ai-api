@@ -14,8 +14,9 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@cerebras/cerebras_cloud_sdk": "^1.59.0",
+    "@cerebras/cerebras_cloud_sdk": "^1.64.1",
     "cerebras": "^1.2.7",
-    "groq-sdk": "^0.37.0"
+    "groq-sdk": "^0.37.0",
+    "zod": "^4.4.3"
   }
 }
