@@ -95,7 +95,7 @@ function buildInitialState(): Record<Provider, ProviderState> {
         cerebras: {
             provider: "cerebras",
             enabled: true,
-            configured: true,
+            configured: Boolean(config.cerebrasApiKey),
             healthy: true,
             cooldownUntil: null,
             lastSelectedAt: null,
@@ -107,7 +107,7 @@ function buildInitialState(): Record<Provider, ProviderState> {
         groq: {
             provider: "groq",
             enabled: true,
-            configured: true,
+            configured: Boolean(config.groqApiKey),
             healthy: true,
             cooldownUntil: null,
             lastSelectedAt: null,

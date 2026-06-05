@@ -2,18 +2,17 @@
 // Bun auto-loads .env and .env.local — do NOT add dotenv.
 // All process.env reads happen here; all other modules import from this file.
 
-function required(name: string): string {
-    const v = process.env[name];
-    if (!v) throw new Error(`Required env var ${name} is not set`);
-    return v;
+function optional(name: string): string | null {
+    const value = process.env[name]?.trim();
+    return value ? value : null;
 }
 
 export const config = {
     port: Number(process.env["PORT"] ?? 3000),
     hostname: process.env["HOSTNAME"] ?? "0.0.0.0",
-    personalProxyApiKey: required("PERSONAL_PROXY_API_KEY"),
-    cerebrasApiKey: required("CEREBRAS_API_KEY"),
-    groqApiKey: required("GROQ_API_KEY"),
+    personalProxyApiKey: optional("PERSONAL_PROXY_API_KEY"),
+    cerebrasApiKey: optional("CEREBRAS_API_KEY"),
+    groqApiKey: optional("GROQ_API_KEY"),
     cerebrasBaseUrl: process.env["CEREBRAS_BASE_URL"] ?? "https://api.cerebras.ai/v1",
     groqBaseUrl: process.env["GROQ_BASE_URL"] ?? "https://api.groq.com/openai/v1",
     cerebrasVersionPatch: process.env["CEREBRAS_VERSION_PATCH"] ?? "2",

@@ -5,15 +5,27 @@ import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming, ChatComple
 import { config } from '../config';
 import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
-// SDK singleton initialized with maxRetries:0 (INFRA-03) — proxy handles retries/failover
-const cerebras = new Cerebras({ apiKey: config.cerebrasApiKey, maxRetries: 0 });
+let cerebras: Cerebras | null = null;
+
+function getCerebrasClient(): Cerebras {
+    if (!config.cerebrasApiKey) {
+        throw new Error('Cerebras provider is not configured.');
+    }
+
+    if (!cerebras) {
+        cerebras = new Cerebras({ apiKey: config.cerebrasApiKey, maxRetries: 0 });
+    }
+
+    return cerebras;
+}
 
 export const cerebrasAdapter: ProviderAdapter = {
     name: 'cerebras',
     async complete(upstreamModelId: string, params: CompletionParams): Promise<CompletionOutcome> {
+        const client = getCerebrasClient();
         // Cast create() params to NonStreaming overload; cast response to ChatCompletionResponse
         // (the union ChatCompletion includes chunk types; we know this path returns the full response)
-        const { data, response } = await cerebras.chat.completions.create(
+        const { data, response } = await client.chat.completions.create(
             {
                 model: upstreamModelId,
                 messages: params.messages,
@@ -60,7 +72,8 @@ export const cerebrasAdapter: ProviderAdapter = {
         params: CompletionParams,
         signal: AbortSignal
     ): Promise<AsyncIterable<StreamChunk>> {
-        const sdkStream = await cerebras.chat.completions.create(
+        const client = getCerebrasClient();
+        const sdkStream = await client.chat.completions.create(
             {
                 model: upstreamModelId,
                 messages: params.messages,

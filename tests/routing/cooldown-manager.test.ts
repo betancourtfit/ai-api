@@ -48,6 +48,18 @@ describe("parseGroqHeaders", () => {
             retryAfterSeconds: undefined,
         });
     });
+
+    test("parses plain object headers", () => {
+        const parsed = parseGroqHeaders({
+            "x-ratelimit-reset-requests": "30s",
+            "x-ratelimit-reset-tokens": "1m",
+            "retry-after": "2",
+        });
+
+        expect(parsed.resetRequestsSeconds).toBe(30);
+        expect(parsed.resetTokensSeconds).toBe(60);
+        expect(parsed.retryAfterSeconds).toBe(2);
+    });
 });
 
 describe("parseCerebrasHeaders", () => {
@@ -74,6 +86,16 @@ describe("parseCerebrasHeaders", () => {
             resetRequestsDaySeconds: undefined,
             resetTokensMinuteSeconds: undefined,
         });
+    });
+
+    test("parses plain object headers", () => {
+        const parsed = parseCerebrasHeaders({
+            "x-ratelimit-remaining-requests-day": "999",
+            "x-ratelimit-reset-tokens-minute": "11.382867097854614",
+        });
+
+        expect(parsed.remainingRequestsDay).toBe(999);
+        expect(parsed.resetTokensMinuteSeconds).toBe(11.382867097854614);
     });
 });
 

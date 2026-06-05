@@ -2,6 +2,13 @@
 import { APIError as CerebrasAPIError } from "@cerebras/cerebras_cloud_sdk";
 import { APIError as GroqAPIError } from "groq-sdk";
 
+type HeaderSource =
+    | Headers
+    | Record<string, string | string[] | null | undefined>
+    | { get(name: string): string | null | undefined };
+
+export type { HeaderSource };
+
 export interface ParsedCerebrasHeaders {
     remainingRequestsDay?: number;
     remainingTokensMinute?: number;
@@ -17,22 +24,22 @@ export interface ParsedGroqHeaders {
     retryAfterSeconds?: number;
 }
 
-export function parseCerebrasHeaders(headers: Headers): ParsedCerebrasHeaders {
+export function parseCerebrasHeaders(headers: HeaderSource): ParsedCerebrasHeaders {
     return {
-        remainingRequestsDay: toFloat(headers.get("x-ratelimit-remaining-requests-day")),
-        remainingTokensMinute: toFloat(headers.get("x-ratelimit-remaining-tokens-minute")),
-        resetRequestsDaySeconds: toFloat(headers.get("x-ratelimit-reset-requests-day")),
-        resetTokensMinuteSeconds: toFloat(headers.get("x-ratelimit-reset-tokens-minute")),
+        remainingRequestsDay: toFloat(readHeader(headers, "x-ratelimit-remaining-requests-day")),
+        remainingTokensMinute: toFloat(readHeader(headers, "x-ratelimit-remaining-tokens-minute")),
+        resetRequestsDaySeconds: toFloat(readHeader(headers, "x-ratelimit-reset-requests-day")),
+        resetTokensMinuteSeconds: toFloat(readHeader(headers, "x-ratelimit-reset-tokens-minute")),
     };
 }
 
-export function parseGroqHeaders(headers: Headers): ParsedGroqHeaders {
+export function parseGroqHeaders(headers: HeaderSource): ParsedGroqHeaders {
     return {
-        remainingRequests: toNum(headers.get("x-ratelimit-remaining-requests")),
-        remainingTokens: toNum(headers.get("x-ratelimit-remaining-tokens")),
-        resetRequestsSeconds: parseDuration(headers.get("x-ratelimit-reset-requests")),
-        resetTokensSeconds: parseDuration(headers.get("x-ratelimit-reset-tokens")),
-        retryAfterSeconds: toFloat(headers.get("retry-after")),
+        remainingRequests: toNum(readHeader(headers, "x-ratelimit-remaining-requests")),
+        remainingTokens: toNum(readHeader(headers, "x-ratelimit-remaining-tokens")),
+        resetRequestsSeconds: parseDuration(readHeader(headers, "x-ratelimit-reset-requests")),
+        resetTokensSeconds: parseDuration(readHeader(headers, "x-ratelimit-reset-tokens")),
+        retryAfterSeconds: toFloat(readHeader(headers, "retry-after")),
     };
 }
 
@@ -53,7 +60,7 @@ export function calcCooldownMs(
 export function classifyError(err: unknown): {
     shouldFailover: boolean;
     status: number | undefined;
-    headers: Headers | undefined;
+    headers: HeaderSource | undefined;
 } {
     const failoverStatuses = new Set([408, 429, 498, 500, 502, 503, 504]);
     const noFailoverStatuses = new Set([400, 401, 403, 404, 413, 422]);
@@ -87,6 +94,32 @@ function toNum(value: string | null): number | undefined {
     if (!value) return undefined;
     const parsed = Number(value);
     return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function readHeader(headers: HeaderSource, name: string): string | null {
+    if ("get" in headers && typeof headers.get === "function") {
+        return headers.get(name) ?? null;
+    }
+
+    const recordHeaders = headers as Record<string, string | string[] | null | undefined>;
+    const direct = recordHeaders[name];
+    if (Array.isArray(direct)) {
+        return direct[0] ?? null;
+    }
+    if (typeof direct === "string") {
+        return direct;
+    }
+
+    const normalizedName = name.toLowerCase();
+    for (const [key, value] of Object.entries(recordHeaders)) {
+        if (key.toLowerCase() !== normalizedName) continue;
+        if (Array.isArray(value)) {
+            return value[0] ?? null;
+        }
+        return typeof value === "string" ? value : null;
+    }
+
+    return null;
 }
 
 function parseDuration(value: string | null): number | undefined {

@@ -6,14 +6,26 @@ import type { ChatCompletionChunk } from 'groq-sdk/resources/chat/completions';
 import { config } from '../config';
 import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
-// SDK singleton initialized with maxRetries:0 (INFRA-03) — proxy handles retries/failover
-const groq = new Groq({ apiKey: config.groqApiKey, maxRetries: 0 });
+let groq: Groq | null = null;
+
+function getGroqClient(): Groq {
+    if (!config.groqApiKey) {
+        throw new Error('Groq provider is not configured.');
+    }
+
+    if (!groq) {
+        groq = new Groq({ apiKey: config.groqApiKey, maxRetries: 0 });
+    }
+
+    return groq;
+}
 
 export const groqAdapter: ProviderAdapter = {
     name: 'groq',
     async complete(upstreamModelId: string, params: CompletionParams): Promise<CompletionOutcome> {
+        const client = getGroqClient();
         // stream:false resolves to ChatCompletionCreateParamsNonStreaming overload
-        const { data, response } = await groq.chat.completions.create({
+        const { data, response } = await client.chat.completions.create({
             model: upstreamModelId,
             messages: params.messages,
             temperature: params.temperature ?? undefined,
@@ -52,7 +64,8 @@ export const groqAdapter: ProviderAdapter = {
         params: CompletionParams,
         signal: AbortSignal
     ): Promise<AsyncIterable<StreamChunk>> {
-        const sdkStream = await groq.chat.completions.create({
+        const client = getGroqClient();
+        const sdkStream = await client.chat.completions.create({
             model: upstreamModelId,
             messages: params.messages,
             temperature: params.temperature ?? undefined,

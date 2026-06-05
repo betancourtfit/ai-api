@@ -9,7 +9,8 @@ import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, s
 import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
-import type { CompletionParams, ProviderAdapter } from './types';
+import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
+import type { HeaderSource } from './routing/cooldown-manager';
 
 // Map provider names to adapters — both providers registered (D-01 complete)
 const adapterMap: Record<Provider, ProviderAdapter> = {
@@ -46,7 +47,17 @@ function verifyToken(token: string, expected: string): boolean {
     return timingSafeEqual(a, b);
 }
 
-function parseRateLimitHeaders(provider: Provider, headers: Headers) {
+function authNotConfiguredError(): Response {
+    return openaiError(
+        'Proxy authentication is not configured.',
+        'server_error',
+        'proxy_not_configured',
+        null,
+        503
+    );
+}
+
+function parseRateLimitHeaders(provider: Provider, headers: HeaderSource) {
     return provider === 'cerebras'
         ? parseCerebrasHeaders(headers)
         : parseGroqHeaders(headers);
@@ -64,6 +75,14 @@ function toRateLimitSnapshot(parsed: Record<string, number | undefined>): Record
     return snapshot;
 }
 
+function hasVisibleChunkData(chunk: StreamChunk): boolean {
+    return chunk.choices.some((choice) => (
+        choice.finish_reason !== null
+        || choice.delta.role !== undefined
+        || choice.delta.content !== undefined
+    ));
+}
+
 const server = Bun.serve({
     hostname: config.hostname,
     port: config.port,
@@ -77,14 +96,17 @@ const server = Bun.serve({
 
         if (request.method === 'GET' && pathname === '/ready') {
             const logicalModel = listAliases()[0] ?? '';
+            const proxyKeyConfigured = Boolean(config.personalProxyApiKey);
             const eligibleProviders = (['cerebras', 'groq'] as Provider[]).filter((provider) => (
                 isEligible(provider, logicalModel)
             ));
             const unavailableProviders = (['cerebras', 'groq'] as Provider[]).filter((provider) => (
                 !eligibleProviders.includes(provider)
             ));
-            const ready = eligibleProviders.length > 0;
-            const mode = unavailableProviders.length === 0 ? 'ok' : 'degraded';
+            const ready = proxyKeyConfigured && eligibleProviders.length > 0;
+            const mode = !proxyKeyConfigured
+                ? 'not_configured'
+                : unavailableProviders.length === 0 ? 'ok' : 'degraded';
 
             return new Response(
                 JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders }),
@@ -96,6 +118,10 @@ const server = Bun.serve({
         }
 
         // --- Auth gate — all routes below require Bearer PERSONAL_PROXY_API_KEY ---
+        if (!config.personalProxyApiKey) {
+            return authNotConfiguredError();
+        }
+
         const token = extractBearerToken(request);
         if (!token || !verifyToken(token, config.personalProxyApiKey)) {
             return openaiError(
@@ -267,6 +293,9 @@ const server = Bun.serve({
                     try {
                         for await (const chunk of sdkStream) {
                             const normalized = { ...chunk, model: input.model };
+                            if (!hasVisibleChunkData(normalized)) {
+                                continue;
+                            }
                             firstChunkSent = true;
                             yield `data: ${JSON.stringify(normalized)}\n\n`;
                         }
