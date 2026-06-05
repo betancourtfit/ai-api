@@ -71,12 +71,12 @@ Plans:
   3. `bun test` reports all 12 test cases passing, including round-robin alternation, cooldown, recovery, failover, exhaustion, auth rejection, alias rejection, field rejection, non-streaming shape, streaming format, model rewrite, and state reset.
   4. Error responses at every error path return `{ "error": { "message", "type", "code", "param" } }` — never a flat body.
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 Plans:
 
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Central response normalizer (allowlist-rebuild) wired into both response paths (NORM-01..09)
+- [x] 03-01-PLAN.md — Central response normalizer (allowlist-rebuild) wired into both response paths (NORM-01..09)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -94,7 +94,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete    | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete    | 2026-06-05 |
-| 3. Full Compliance + Tests | 0/3 | Planned | - |
+| 3. Full Compliance + Tests | 1/3 | In Progress|  |
 
 ---
 
