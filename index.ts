@@ -9,6 +9,7 @@ import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, s
 import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
+import { normalizeChunk, normalizeResponse } from './response-normalizer';
 import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
 
@@ -292,7 +293,7 @@ const server = Bun.serve({
 
                     try {
                         for await (const chunk of sdkStream) {
-                            const normalized = { ...chunk, model: input.model };
+                            const normalized = normalizeChunk(chunk, input.model);
                             if (!hasVisibleChunkData(normalized)) {
                                 continue;
                             }
@@ -336,10 +337,10 @@ const server = Bun.serve({
                     setRateLimitSnapshot(provider, snapshot);
                     recordSuccess(provider, 200);
 
-                    result.model = input.model;
+                    const normalized = normalizeResponse(result, input.model);
 
                     return new Response(
-                        JSON.stringify(result),
+                        JSON.stringify(normalized),
                         { status: 200, headers: { 'Content-Type': 'application/json' } }
                     );
                 } catch (err) {

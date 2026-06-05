@@ -44,24 +44,23 @@ export const cerebrasAdapter: ProviderAdapter = {
         ).withResponse();
         const completion = data as ChatCompletion.ChatCompletionResponse;
 
-        // Build result field-by-field — do NOT spread response (Pitfall 4):
-        //   response.time_info: stripped (spec §15 — not forwarded downstream)
-        //   response.choices[*].message.reasoning: stripped (spec §12 — never expose)
+        // Build result field-by-field — do NOT spread response (Pitfall 4).
+        // response-normalizer.ts owns field stripping (time_info, reasoning, etc.) and model rewrite.
         const result: ChatCompletionResult = {
             id: completion.id,
             object: 'chat.completion',
             created: completion.created,
-            model: completion.model, // caller (index.ts) rewrites to logical alias
+            model: completion.model,
             choices: completion.choices.map((c, i) => ({
                 index: i,
                 message: { role: 'assistant', content: c.message.content ?? '' },
                 finish_reason: c.finish_reason ?? null,
             })),
-            usage: {
-                prompt_tokens: completion.usage?.prompt_tokens ?? 0,
-                completion_tokens: completion.usage?.completion_tokens ?? 0,
-                total_tokens: completion.usage?.total_tokens ?? 0,
-            },
+            usage: completion.usage ? {
+                prompt_tokens: completion.usage.prompt_tokens ?? 0,
+                completion_tokens: completion.usage.completion_tokens ?? 0,
+                total_tokens: completion.usage.total_tokens ?? 0,
+            } : undefined,
             system_fingerprint: completion.system_fingerprint ?? undefined,
         };
 

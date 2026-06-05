@@ -39,21 +39,22 @@ export const groqAdapter: ProviderAdapter = {
         // Build result field-by-field — do NOT spread response (Pitfall 5).
         // Groq-specific fields (internal metadata, hardware cache stats, tier) are
         // structurally excluded by only copying the standard OpenAI-compatible fields.
+        // response-normalizer.ts owns field stripping and model rewrite.
         const result: ChatCompletionResult = {
             id: data.id,
             object: 'chat.completion',
             created: data.created,
-            model: data.model, // caller (index.ts) rewrites to logical alias
+            model: data.model,
             choices: data.choices.map((c, i) => ({
                 index: i,
                 message: { role: 'assistant', content: c.message.content ?? '' },
                 finish_reason: c.finish_reason ?? null,
             })),
-            usage: {
-                prompt_tokens: data.usage?.prompt_tokens ?? 0,
-                completion_tokens: data.usage?.completion_tokens ?? 0,
-                total_tokens: data.usage?.total_tokens ?? 0,
-            },
+            usage: data.usage ? {
+                prompt_tokens: data.usage.prompt_tokens ?? 0,
+                completion_tokens: data.usage.completion_tokens ?? 0,
+                total_tokens: data.usage.total_tokens ?? 0,
+            } : undefined,
             system_fingerprint: data.system_fingerprint ?? undefined,
         };
 
