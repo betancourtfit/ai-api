@@ -1,5 +1,5 @@
 // types.ts — shared interface contracts for the proxy
-// ProviderAdapter yields upstream model IDs; index.ts rewrites them to the logical alias.
+// ProviderAdapter yields upstream model IDs; response-normalizer.ts rewrites them to the logical alias.
 
 export interface CompletionParams {
     messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
@@ -14,13 +14,13 @@ export interface ChatCompletionResult {
     id: string;
     object: "chat.completion";
     created: number;
-    model: string; // adapter returns upstream id; index.ts rewrites to logical alias
+    model: string; // adapter returns upstream id; response-normalizer.ts rewrites to logical alias
     choices: Array<{
         index: number;
         message: { role: "assistant"; content: string };
         finish_reason: string | null;
     }>;
-    usage: {
+    usage?: {
         prompt_tokens: number;
         completion_tokens: number;
         total_tokens: number;
