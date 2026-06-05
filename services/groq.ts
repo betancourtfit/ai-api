@@ -1,9 +1,10 @@
 // services/groq.ts — Groq non-streaming adapter (D-01 second adapter)
-// Implements ProviderAdapter; no streaming in Phase 1 (D-02)
+// Implements ProviderAdapter for both non-streaming and streaming completions.
 // groq-sdk v1.2.1: import Groq default; stream:false uses ChatCompletionCreateParamsNonStreaming overload
 import Groq from 'groq-sdk';
+import type { ChatCompletionChunk } from 'groq-sdk/resources/chat/completions';
 import { config } from '../config';
-import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams } from '../types';
+import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
 // SDK singleton initialized with maxRetries:0 (INFRA-03) — proxy handles retries/failover
 const groq = new Groq({ apiKey: config.groqApiKey, maxRetries: 0 });
@@ -45,5 +46,49 @@ export const groqAdapter: ProviderAdapter = {
         };
 
         return { result, headers: response.headers };
+    },
+    async stream(
+        upstreamModelId: string,
+        params: CompletionParams,
+        signal: AbortSignal
+    ): Promise<AsyncIterable<StreamChunk>> {
+        const sdkStream = await groq.chat.completions.create({
+            model: upstreamModelId,
+            messages: params.messages,
+            temperature: params.temperature ?? undefined,
+            top_p: params.top_p ?? undefined,
+            max_completion_tokens: params.max_completion_tokens,
+            stop: params.stop ?? undefined,
+            seed: params.seed ?? undefined,
+            stream: true,
+        }, { signal });
+
+        return (async function* (): AsyncIterable<StreamChunk> {
+            for await (const raw of sdkStream) {
+                const chunk = raw as ChatCompletionChunk;
+
+                yield {
+                    id: chunk.id,
+                    object: 'chat.completion.chunk',
+                    created: chunk.created,
+                    model: chunk.model,
+                    choices: chunk.choices.map((choice) => {
+                        const delta: StreamChunk['choices'][number]['delta'] = {};
+                        if (choice.delta.role !== undefined) {
+                            delta.role = choice.delta.role;
+                        }
+                        if ('content' in choice.delta) {
+                            delta.content = choice.delta.content ?? null;
+                        }
+
+                        return {
+                            index: choice.index,
+                            delta,
+                            finish_reason: choice.finish_reason ?? null,
+                        };
+                    }),
+                };
+            }
+        })();
     },
 };

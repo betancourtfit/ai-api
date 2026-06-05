@@ -1,5 +1,5 @@
 // types.ts — shared interface contracts for the proxy
-// ProviderAdapter: non-streaming completion interface (streaming deferred to Phase 2 plan 02-02)
+// ProviderAdapter yields upstream model IDs; index.ts rewrites them to the logical alias.
 
 export interface CompletionParams {
     messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
@@ -33,8 +33,23 @@ export interface CompletionOutcome {
     headers: Headers;
 }
 
+export interface StreamChunk {
+    id: string;
+    object: "chat.completion.chunk";
+    created: number;
+    model: string;
+    choices: Array<{
+        index: number;
+        delta: {
+            role?: string;
+            content?: string | null;
+        };
+        finish_reason: string | null;
+    }>;
+}
+
 export interface ProviderAdapter {
     name: string;
     complete(upstreamModelId: string, params: CompletionParams): Promise<CompletionOutcome>;
-    // stream() deferred to Phase 2 (D-02)
+    stream(upstreamModelId: string, params: CompletionParams, signal: AbortSignal): Promise<AsyncIterable<StreamChunk>>;
 }

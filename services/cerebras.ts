@@ -1,9 +1,9 @@
 // services/cerebras.ts — Cerebras non-streaming adapter (D-01 first adapter)
-// Implements ProviderAdapter; no streaming in Phase 1 (D-02)
+// Implements ProviderAdapter for both non-streaming and streaming completions.
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
-import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from '@cerebras/cerebras_cloud_sdk/resources/chat';
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming, ChatCompletionCreateParamsStreaming } from '@cerebras/cerebras_cloud_sdk/resources/chat';
 import { config } from '../config';
-import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams } from '../types';
+import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
 // SDK singleton initialized with maxRetries:0 (INFRA-03) — proxy handles retries/failover
 const cerebras = new Cerebras({ apiKey: config.cerebrasApiKey, maxRetries: 0 });
@@ -54,5 +54,57 @@ export const cerebrasAdapter: ProviderAdapter = {
         };
 
         return { result, headers: response.headers };
+    },
+    async stream(
+        upstreamModelId: string,
+        params: CompletionParams,
+        signal: AbortSignal
+    ): Promise<AsyncIterable<StreamChunk>> {
+        const sdkStream = await cerebras.chat.completions.create(
+            {
+                model: upstreamModelId,
+                messages: params.messages,
+                temperature: params.temperature ?? undefined,
+                top_p: params.top_p ?? undefined,
+                max_completion_tokens: params.max_completion_tokens,
+                stop: params.stop ?? undefined,
+                seed: params.seed ?? undefined,
+                stream: true,
+            } as ChatCompletionCreateParamsStreaming,
+            {
+                headers: {
+                    'X-Cerebras-Version-Patch': config.cerebrasVersionPatch,
+                },
+                signal,
+            }
+        );
+
+        return (async function* (): AsyncIterable<StreamChunk> {
+            for await (const raw of sdkStream) {
+                const chunk = raw as ChatCompletion.ChatChunkResponse;
+
+                yield {
+                    id: chunk.id,
+                    object: 'chat.completion.chunk',
+                    created: chunk.created,
+                    model: chunk.model,
+                    choices: (chunk.choices ?? []).map((choice) => {
+                        const delta: StreamChunk['choices'][number]['delta'] = {};
+                        if (choice.delta?.role !== undefined && choice.delta.role !== null) {
+                            delta.role = choice.delta.role;
+                        }
+                        if (choice.delta && 'content' in choice.delta) {
+                            delta.content = choice.delta.content ?? null;
+                        }
+
+                        return {
+                            index: choice.index,
+                            delta,
+                            finish_reason: choice.finish_reason ?? null,
+                        };
+                    }),
+                };
+            }
+        })();
     },
 };
