@@ -6,10 +6,13 @@ import { isKnownAlias, resolveUpstreamModel, listAliases } from './model-registr
 import { validateChatCompletion } from './request-schema';
 import type { CompletionParams } from './types';
 import { cerebrasAdapter } from './services/cerebras';
+import { groqAdapter } from './services/groq';
 
-// Map provider names to adapters (Phase 2 will replace with round-robin router)
+// Map provider names to adapters — both providers registered (D-01 complete)
+// Phase 2 will replace first-eligible selection with stateful round-robin router
 const adapterMap = {
     cerebras: cerebrasAdapter,
+    groq: groqAdapter,
 } as const;
 
 // OpenAI-style error shape (D-05 + spec §14) — used for ALL error paths
