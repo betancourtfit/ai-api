@@ -1,7 +1,7 @@
 // services/cerebras.ts — Cerebras non-streaming adapter (D-01 first adapter)
 // Implements ProviderAdapter; no streaming in Phase 1 (D-02)
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
-import type { ChatCompletionCreateParamsNonStreaming } from '@cerebras/cerebras_cloud_sdk';
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from '@cerebras/cerebras_cloud_sdk/resources/chat';
 import { config } from '../config';
 import type { ProviderAdapter, ChatCompletionResult, CompletionParams } from '../types';
 
@@ -11,6 +11,8 @@ const cerebras = new Cerebras({ apiKey: config.cerebrasApiKey, maxRetries: 0 });
 export const cerebrasAdapter: ProviderAdapter = {
     name: 'cerebras',
     async complete(upstreamModelId: string, params: CompletionParams): Promise<ChatCompletionResult> {
+        // Cast create() params to NonStreaming overload; cast response to ChatCompletionResponse
+        // (the union ChatCompletion includes chunk types; we know this path returns the full response)
         const response = await cerebras.chat.completions.create(
             {
                 model: upstreamModelId,
@@ -27,7 +29,7 @@ export const cerebrasAdapter: ProviderAdapter = {
                     'X-Cerebras-Version-Patch': config.cerebrasVersionPatch,
                 },
             }
-        );
+        ) as ChatCompletion.ChatCompletionResponse;
 
         // Build result field-by-field — do NOT spread response (Pitfall 4):
         //   response.time_info: stripped (spec §15 — not forwarded downstream)
