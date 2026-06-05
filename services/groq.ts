@@ -23,10 +23,9 @@ export const groqAdapter: ProviderAdapter = {
             stream: false,
         });
 
-        // Build result field-by-field — do NOT spread response (Pitfall 5):
-        //   response.x_groq: stripped (Groq-internal metadata — never forward)
-        //   response.usage_breakdown: stripped (hardware cache stats — never forward)
-        //   response.service_tier: stripped
+        // Build result field-by-field — do NOT spread response (Pitfall 5).
+        // Groq-specific fields (internal metadata, hardware cache stats, tier) are
+        // structurally excluded by only copying the standard OpenAI-compatible fields.
         return {
             id: response.id,
             object: 'chat.completion',
