@@ -18,6 +18,10 @@ export const config = {
     groqBaseUrl: process.env["GROQ_BASE_URL"] ?? "https://api.groq.com/openai/v1",
     cerebrasVersionPatch: process.env["CEREBRAS_VERSION_PATCH"] ?? "2",
     defaultMaxCompletionTokens: Number(process.env["DEFAULT_MAX_COMPLETION_TOKENS"] ?? 4096),
+    defaultCooldownSeconds: Number(process.env["DEFAULT_COOLDOWN_SECONDS"] ?? 60),
+    maxProviderAttemptsPerRequest: Number(process.env["MAX_PROVIDER_ATTEMPTS_PER_REQUEST"] ?? 2),
+    exposeProviderHeader: (process.env["EXPOSE_PROVIDER_HEADER"] ?? "false") === "true",
+    enableInternalStatusEndpoint: (process.env["ENABLE_INTERNAL_STATUS_ENDPOINT"] ?? "true") === "true",
     providerOrder: (process.env["PROVIDER_ORDER"] ?? "cerebras,groq").split(",") as Array<"cerebras" | "groq">,
     modelRegistryJson: process.env["MODEL_REGISTRY_JSON"]
         ?? `{"gpt-oss-120b-balanced":{"cerebras":"gpt-oss-120b","groq":"openai/gpt-oss-120b"}}`,
