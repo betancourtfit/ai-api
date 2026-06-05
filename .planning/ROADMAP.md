@@ -10,7 +10,7 @@
 
 ## Phases
 
-- [ ] **Phase 1: Foundation** - Working non-streaming endpoint with auth, validation, model registry, and one provider call
+- [x] **Phase 1: Foundation** - Working non-streaming endpoint with auth, validation, model registry, and one provider call (completed 2026-06-05)
 - [ ] **Phase 2: Routing + Streaming** - Stateful round-robin, cooldown, rate-limit parsing, SSE relay, and all /v1 endpoints
 - [ ] **Phase 3: Full Compliance + Tests** - Complete normalization, observability, diagnostic endpoints, and full test coverage
 
@@ -32,11 +32,11 @@
   4. `POST /v1/chat/completions` with a valid request body returns a complete non-streaming OpenAI-shaped response using one upstream provider SDK.
   5. The old `/chat` endpoint returns 404; no raw provider model IDs appear in any response.
 
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 Plans:
 
 - [x] 01-01-PLAN.md — Walking skeleton: dependency cleanup + config + registry + Cerebras adapter + auth + validation wired to one real completion (`bun index.ts`)
-- [ ] 01-02-PLAN.md — Hardening: full strict allowlist/reject-list, Groq adapter (D-01), GET /v1/models, /chat removal, wrong-key 401
+- [x] 01-02-PLAN.md — Hardening: full strict allowlist/reject-list, Groq adapter (D-01), GET /v1/models, /chat removal, wrong-key 401
 
 ### Phase 2: Routing + Streaming
 
@@ -75,7 +75,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 1/2 | In Progress|  |
+| 1. Foundation | 2/2 | Complete   | 2026-06-05 |
 | 2. Routing + Streaming | 0/? | Not started | - |
 | 3. Full Compliance + Tests | 0/? | Not started | - |
 
