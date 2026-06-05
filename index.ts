@@ -1,8 +1,8 @@
 // index.ts — Bun.serve() router with auth + validation + alias resolve + completion
-// Phase 1: non-streaming path only (D-02); round-robin is Phase 2 (D-01 discretion)
+// Phase 3: createServer factory (D-02), X-Request-ID (OBS-01), structured logs (OBS-02..04), NORM-10, D-07
 import { timingSafeEqual } from 'node:crypto';
 import { config } from './config';
-import { isKnownAlias, resolveUpstreamModel, listAliases } from './model-registry';
+import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
 import { validateChatCompletion } from './request-schema';
 import { calcCooldownMs, classifyError, parseCerebrasHeaders, parseGroqHeaders } from './routing/cooldown-manager';
 import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure } from './routing/provider-state';
@@ -12,6 +12,18 @@ import { groqAdapter } from './services/groq';
 import { normalizeChunk, normalizeResponse } from './response-normalizer';
 import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
+
+// OBS-02: log level numeric map — error:0, warn:1, info:2
+const LOG_LEVEL_MAP: Record<string, number> = { error: 0, warn: 1, info: 2 };
+const configuredLogLevel = LOG_LEVEL_MAP[config.logLevel] ?? 2;
+
+// OBS-02: structured logger with LOG_LEVEL gating
+function log(level: 'info' | 'warn' | 'error', data: Record<string, unknown>): void {
+    const entryLevel = LOG_LEVEL_MAP[level] ?? 2;
+    if (entryLevel <= configuredLogLevel) {
+        console.log(JSON.stringify({ level, ...data }));
+    }
+}
 
 // OpenAI-style error shape (D-05 + spec §14) — used for ALL error paths
 function openaiError(
@@ -87,11 +99,21 @@ export function createServer(
         hostname: config.hostname,
         port,
         async fetch(request, server) {
+            // OBS-01: generate request ID at the very top — attached to every response
+            const requestId = crypto.randomUUID();
+            const requestStart = Date.now();
             const { pathname } = new URL(request.url);
+
+            // OBS-01: rebuild response with X-Request-ID header on every non-streaming return
+            function withRequestId(response: Response): Response {
+                const headers = new Headers(response.headers);
+                headers.set('X-Request-ID', requestId);
+                return new Response(response.body, { status: response.status, headers });
+            }
 
             // EP-04: GET /health — no auth required (healthcheck para EasyPanel / reverse proxies)
             if (request.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-                return new Response('ok', { status: 200 });
+                return withRequestId(new Response('ok', { status: 200 }));
             }
 
             if (request.method === 'GET' && pathname === '/ready') {
@@ -108,45 +130,46 @@ export function createServer(
                     ? 'not_configured'
                     : unavailableProviders.length === 0 ? 'ok' : 'degraded';
 
-                return new Response(
+                return withRequestId(new Response(
                     JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders }),
                     {
                         status: ready ? 200 : 503,
                         headers: { 'Content-Type': 'application/json' },
                     }
-                );
+                ));
             }
 
             // --- Auth gate — all routes below require Bearer PERSONAL_PROXY_API_KEY ---
             if (!config.personalProxyApiKey) {
-                return authNotConfiguredError();
+                return withRequestId(authNotConfiguredError());
             }
 
             const token = extractBearerToken(request);
             if (!token || !verifyToken(token, config.personalProxyApiKey)) {
-                return openaiError(
+                return withRequestId(openaiError(
                     'No authorization provided or invalid credentials.',
                     'invalid_request_error',
                     'missing_auth',
                     null,
                     401
-                );
+                ));
             }
 
             if (request.method === 'GET' && pathname === '/internal/providers/status') {
                 if (!config.enableInternalStatusEndpoint) {
-                    return new Response('Not found', { status: 404 });
+                    // NORM-10: OpenAI error shape for disabled internal endpoint
+                    return withRequestId(openaiError('The requested endpoint does not exist.', 'invalid_request_error', 'not_found', null, 404));
                 }
 
-                return new Response(
+                return withRequestId(new Response(
                     JSON.stringify({ providers: Object.values(getStateSnapshot()) }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
-                );
+                ));
             }
 
             // GET /v1/models — list logical proxy aliases only (REG-04; EP-03)
             if (request.method === 'GET' && pathname === '/v1/models') {
-                return new Response(
+                return withRequestId(new Response(
                     JSON.stringify({
                         object: 'list',
                         data: listAliases().map((id) => ({
@@ -157,7 +180,7 @@ export function createServer(
                         })),
                     }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
-                );
+                ));
             }
 
             // POST /v1/chat/completions — main non-streaming completion endpoint
@@ -167,32 +190,32 @@ export function createServer(
                 try {
                     body = await request.json();
                 } catch {
-                    return openaiError('Request body must be valid JSON.', 'invalid_request_error', 'invalid_request_error', null, 400);
+                    return withRequestId(openaiError('Request body must be valid JSON.', 'invalid_request_error', 'invalid_request_error', null, 400));
                 }
 
                 // VALID-01/02: validate against strict Zod schema (first-error, D-05)
                 const validation = validateChatCompletion(body);
                 if (!validation.success) {
-                    return openaiError(
+                    return withRequestId(openaiError(
                         validation.message,
                         'invalid_request_error',
                         'invalid_request_error',
                         validation.param,
                         400
-                    );
+                    ));
                 }
 
                 const input = validation.data;
 
                 // VALID-01: unknown model alias — reject before any upstream call
                 if (!isKnownAlias(input.model)) {
-                    return openaiError(
+                    return withRequestId(openaiError(
                         `Unknown model '${input.model}'.`,
                         'invalid_request_error',
                         'model_not_found',
                         'model',
                         400
-                    );
+                    ));
                 }
 
                 // D-04: inject default max_completion_tokens if client omitted it
@@ -211,13 +234,28 @@ export function createServer(
                 advanceCursor();
 
                 if (candidates.length === 0) {
-                    return openaiError(
+                    log('info', {
+                        event: 'request_complete',
+                        requestId,
+                        timestamp: new Date(requestStart).toISOString(),
+                        route: `${request.method} ${pathname}`,
+                        logicalAlias: input.model,
+                        provider: null,
+                        upstreamModelId: null,
+                        attempt: 0,
+                        streaming: input.stream === true,
+                        statusCode: 503,
+                        latencyMs: Date.now() - requestStart,
+                        failoverReason: null,
+                        usage: null,
+                    });
+                    return withRequestId(openaiError(
                         'No eligible provider available for the requested model.',
                         'server_error',
                         'no_provider_available',
                         'model',
                         503
-                    );
+                    ));
                 }
 
                 if (input.stream === true) {
@@ -225,29 +263,35 @@ export function createServer(
                     request.signal.addEventListener('abort', () => controller.abort(), { once: true });
 
                     let chosenProvider: Provider | null = null;
+                    let chosenUpstreamModelId: string | null = null;
                     let sdkStream: AsyncIterable<import('./types').StreamChunk> | null = null;
+                    let attemptCount = 0;
+                    let failoverReason: string | null = null;
 
                     for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
                         const upstreamModelId = resolveUpstreamModel(input.model, provider);
                         if (!upstreamModelId) continue;
                         const adapter = adapters[provider];
+                        attemptCount++;
 
                         try {
                             sdkStream = await adapter.stream(upstreamModelId, params, controller.signal);
                             chosenProvider = provider;
+                            chosenUpstreamModelId = upstreamModelId;
                             break;
                         } catch (err) {
                             const classified = classifyError(err);
                             recordFailure(provider, classified.status ?? 0);
 
                             if (!classified.shouldFailover) {
-                                return openaiError(
-                                    'Upstream provider rejected the request.',
+                                // D-07: pass upstream error message through with model-ID de-leaking
+                                return withRequestId(openaiError(
+                                    rewriteUpstreamModelIds(classified.message ?? 'Upstream provider rejected the request.'),
                                     'invalid_request_error',
                                     'upstream_error',
                                     null,
                                     classified.status ?? 502
-                                );
+                                ));
                             }
 
                             if ((classified.status === 429 || classified.status === 498) && classified.headers) {
@@ -257,38 +301,64 @@ export function createServer(
                                 const cooldownUntil = Date.now() + cooldownMs;
 
                                 setCooldown(provider, cooldownUntil, snapshot);
-                                console.log(JSON.stringify({
+                                failoverReason = `status_${classified.status}`;
+                                log('warn', {
                                     event: 'provider_cooldown',
+                                    requestId,
                                     provider,
                                     status: classified.status,
                                     cooldownUntil: new Date(cooldownUntil).toISOString(),
-                                }));
+                                });
                                 continue;
                             }
 
-                            console.log(JSON.stringify({
+                            failoverReason = `status_${classified.status ?? 'unknown'}`;
+                            log('warn', {
                                 event: 'provider_failover',
+                                requestId,
                                 provider,
                                 status: classified.status,
-                            }));
+                            });
                         }
                     }
 
-                    if (!sdkStream || !chosenProvider) {
-                        return openaiError(
+                    if (!sdkStream || !chosenProvider || !chosenUpstreamModelId) {
+                        log('info', {
+                            event: 'request_complete',
+                            requestId,
+                            timestamp: new Date(requestStart).toISOString(),
+                            route: `${request.method} ${pathname}`,
+                            logicalAlias: input.model,
+                            provider: null,
+                            upstreamModelId: null,
+                            attempt: attemptCount,
+                            streaming: true,
+                            statusCode: 503,
+                            latencyMs: Date.now() - requestStart,
+                            failoverReason,
+                            usage: null,
+                        });
+                        return withRequestId(openaiError(
                             'No eligible provider available for the requested model.',
                             'server_error',
                             'no_provider_available',
                             'model',
                             503
-                        );
+                        ));
                     }
 
                     recordSuccess(chosenProvider, 200);
                     server.timeout(request, 0);
 
+                    // Capture for closure (TypeScript narrowing)
+                    const finalProvider = chosenProvider;
+                    const finalUpstreamModelId = chosenUpstreamModelId;
+                    const finalAttemptCount = attemptCount;
+                    const finalFailoverReason = failoverReason;
+
                     const body = (async function* () {
                         let firstChunkSent = false;
+                        let streamUsage: unknown = null;
 
                         try {
                             for await (const chunk of sdkStream) {
@@ -301,32 +371,78 @@ export function createServer(
                             }
 
                             yield 'data: [DONE]\n\n';
+
+                            // OBS-02: emit request-completion log after [DONE] — total stream duration
+                            log('info', {
+                                event: 'request_complete',
+                                requestId,
+                                timestamp: new Date(requestStart).toISOString(),
+                                route: `${request.method} ${pathname}`,
+                                logicalAlias: input.model,
+                                provider: finalProvider,
+                                upstreamModelId: finalUpstreamModelId,
+                                attempt: finalAttemptCount,
+                                streaming: true,
+                                statusCode: 200,
+                                latencyMs: Date.now() - requestStart,
+                                failoverReason: finalFailoverReason,
+                                usage: streamUsage,
+                            });
                         } catch (err) {
                             if (!firstChunkSent) {
                                 const classified = classifyError(err);
-                                console.log(JSON.stringify({
+                                log('warn', {
                                     event: 'stream_error_before_first_chunk',
-                                    provider: chosenProvider,
+                                    requestId,
+                                    provider: finalProvider,
                                     status: classified.status,
-                                }));
+                                });
+
+                                // OBS-02: emit error log for stream errors before first chunk
+                                log('info', {
+                                    event: 'request_complete',
+                                    requestId,
+                                    timestamp: new Date(requestStart).toISOString(),
+                                    route: `${request.method} ${pathname}`,
+                                    logicalAlias: input.model,
+                                    provider: finalProvider,
+                                    upstreamModelId: finalUpstreamModelId,
+                                    attempt: finalAttemptCount,
+                                    streaming: true,
+                                    statusCode: classified.status ?? 500,
+                                    latencyMs: Date.now() - requestStart,
+                                    failoverReason: finalFailoverReason,
+                                    usage: streamUsage,
+                                });
                             }
                         }
                     })();
 
+                    // OBS-01: X-Request-ID in streaming headers at construction time (not via wrapper)
+                    // OBS-05: X-LLM-Provider conditional on config.exposeProviderHeader
+                    const streamHeaders: Record<string, string> = {
+                        'Content-Type': 'text/event-stream',
+                        'Cache-Control': 'no-cache',
+                        'Connection': 'keep-alive',
+                        'X-Request-ID': requestId,
+                        ...(config.exposeProviderHeader ? { 'X-LLM-Provider': chosenProvider } : {}),
+                    };
+
                     return new Response(body, {
                         status: 200,
-                        headers: {
-                            'Content-Type': 'text/event-stream',
-                            'Cache-Control': 'no-cache',
-                            'Connection': 'keep-alive',
-                        },
+                        headers: streamHeaders,
                     });
                 }
+
+                // Non-streaming path
+                let attempt = 0;
+                let failoverReason: string | null = null;
 
                 for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
                     const upstreamModelId = resolveUpstreamModel(input.model, provider);
                     if (!upstreamModelId) continue;
                     const adapter = adapters[provider];
+                    attempt++;
 
                     try {
                         const { result, headers } = await adapter.complete(upstreamModelId, params);
@@ -336,24 +452,53 @@ export function createServer(
                         setRateLimitSnapshot(provider, snapshot);
                         recordSuccess(provider, 200);
 
+                        // D-08: warn when upstream omits usage
+                        if (result.usage === undefined) {
+                            log('warn', { event: 'usage_missing', provider, requestId });
+                        }
+
                         const normalized = normalizeResponse(result, input.model);
 
-                        return new Response(
+                        // OBS-02: request-completion log for non-streaming success
+                        log('info', {
+                            event: 'request_complete',
+                            requestId,
+                            timestamp: new Date(requestStart).toISOString(),
+                            route: `${request.method} ${pathname}`,
+                            logicalAlias: input.model,
+                            provider,
+                            upstreamModelId,
+                            attempt,
+                            streaming: false,
+                            statusCode: 200,
+                            latencyMs: Date.now() - requestStart,
+                            failoverReason,
+                            usage: normalized.usage,
+                        });
+
+                        // OBS-05: X-LLM-Provider conditional on config.exposeProviderHeader
+                        const responseHeaders: Record<string, string> = {
+                            'Content-Type': 'application/json',
+                            ...(config.exposeProviderHeader ? { 'X-LLM-Provider': provider } : {}),
+                        };
+
+                        return withRequestId(new Response(
                             JSON.stringify(normalized),
-                            { status: 200, headers: { 'Content-Type': 'application/json' } }
-                        );
+                            { status: 200, headers: responseHeaders }
+                        ));
                     } catch (err) {
                         const classified = classifyError(err);
                         recordFailure(provider, classified.status ?? 0);
 
                         if (!classified.shouldFailover) {
-                            return openaiError(
-                                'Upstream provider rejected the request.',
+                            // D-07: pass upstream error message through with model-ID de-leaking
+                            return withRequestId(openaiError(
+                                rewriteUpstreamModelIds(classified.message ?? 'Upstream provider rejected the request.'),
                                 'invalid_request_error',
                                 'upstream_error',
                                 null,
                                 classified.status ?? 502
-                            );
+                            ));
                         }
 
                         if ((classified.status === 429 || classified.status === 498) && classified.headers) {
@@ -363,33 +508,55 @@ export function createServer(
                             const cooldownUntil = Date.now() + cooldownMs;
 
                             setCooldown(provider, cooldownUntil, snapshot);
-                            console.log(JSON.stringify({
+                            failoverReason = `status_${classified.status}`;
+                            log('warn', {
                                 event: 'provider_cooldown',
+                                requestId,
                                 provider,
                                 status: classified.status,
                                 cooldownUntil: new Date(cooldownUntil).toISOString(),
-                            }));
+                            });
                             continue;
                         }
 
-                        console.log(JSON.stringify({
+                        failoverReason = `status_${classified.status ?? 'unknown'}`;
+                        log('warn', {
                             event: 'provider_failover',
+                            requestId,
                             provider,
                             status: classified.status,
-                        }));
+                        });
                     }
                 }
 
-                return openaiError(
+                // OBS-02: request-completion log for exhaustion path
+                log('info', {
+                    event: 'request_complete',
+                    requestId,
+                    timestamp: new Date(requestStart).toISOString(),
+                    route: `${request.method} ${pathname}`,
+                    logicalAlias: input.model,
+                    provider: null,
+                    upstreamModelId: null,
+                    attempt,
+                    streaming: false,
+                    statusCode: 503,
+                    latencyMs: Date.now() - requestStart,
+                    failoverReason,
+                    usage: null,
+                });
+
+                return withRequestId(openaiError(
                     'No eligible provider available for the requested model.',
                     'server_error',
                     'no_provider_available',
                     'model',
                     503
-                );
+                ));
             }
 
-            return new Response('Not found', { status: 404 });
+            // NORM-10: OpenAI error shape for 404 catch-all
+            return withRequestId(openaiError('The requested endpoint does not exist.', 'invalid_request_error', 'not_found', null, 404));
         },
     });
 }
