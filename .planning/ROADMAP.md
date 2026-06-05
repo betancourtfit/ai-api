@@ -71,7 +71,12 @@ Plans:
   3. `bun test` reports all 12 test cases passing, including round-robin alternation, cooldown, recovery, failover, exhaustion, auth rejection, alias rejection, field rejection, non-streaming shape, streaming format, model rewrite, and state reset.
   4. Error responses at every error path return `{ "error": { "message", "type", "code", "param" } }` — never a flat body.
 
-**Plans:** TBD
+**Plans:** 3 plans
+Plans:
+
+- [ ] 03-01-PLAN.md — Central response normalizer (allowlist-rebuild) wired into both response paths (NORM-01..09)
+- [ ] 03-02-PLAN.md — createServer factory, X-Request-ID everywhere, NORM-10 error sweep + D-07 passthrough, structured logging (OBS-01..05)
+- [ ] 03-03-PLAN.md — 12-case integration suite via real server + mocked adapters (TEST-01..12)
 
 ---
 
@@ -81,9 +86,9 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete    | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete    | 2026-06-05 |
-| 3. Full Compliance + Tests | 0/? | Ready to plan | - |
+| 3. Full Compliance + Tests | 0/3 | Planned | - |
 
 ---
 
 *Roadmap created: 2026-06-04*
-*Last updated: 2026-06-05 after Phase 2 completion (2 plans, 2 waves)*
+*Last updated: 2026-06-05 after Phase 3 planning (3 plans, 3 waves)*
