@@ -1,5 +1,5 @@
 // types.ts — shared interface contracts for the proxy
-// ProviderAdapter: non-streaming completion interface (D-02: streaming deferred to Phase 2)
+// ProviderAdapter: non-streaming completion interface (streaming deferred to Phase 2 plan 02-02)
 
 export interface CompletionParams {
     messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
@@ -28,8 +28,13 @@ export interface ChatCompletionResult {
     system_fingerprint?: string;
 }
 
+export interface CompletionOutcome {
+    result: ChatCompletionResult;
+    headers: Headers;
+}
+
 export interface ProviderAdapter {
     name: string;
-    complete(upstreamModelId: string, params: CompletionParams): Promise<ChatCompletionResult>;
+    complete(upstreamModelId: string, params: CompletionParams): Promise<CompletionOutcome>;
     // stream() deferred to Phase 2 (D-02)
 }

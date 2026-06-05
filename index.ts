@@ -4,16 +4,18 @@ import { timingSafeEqual } from 'node:crypto';
 import { config } from './config';
 import { isKnownAlias, resolveUpstreamModel, listAliases } from './model-registry';
 import { validateChatCompletion } from './request-schema';
-import type { CompletionParams } from './types';
+import { calcCooldownMs, classifyError, parseCerebrasHeaders, parseGroqHeaders } from './routing/cooldown-manager';
+import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure } from './routing/provider-state';
+import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
+import type { CompletionParams, ProviderAdapter } from './types';
 
 // Map provider names to adapters — both providers registered (D-01 complete)
-// Phase 2 will replace first-eligible selection with stateful round-robin router
-const adapterMap = {
+const adapterMap: Record<Provider, ProviderAdapter> = {
     cerebras: cerebrasAdapter,
     groq: groqAdapter,
-} as const;
+};
 
 // OpenAI-style error shape (D-05 + spec §14) — used for ALL error paths
 function openaiError(
@@ -44,6 +46,24 @@ function verifyToken(token: string, expected: string): boolean {
     return timingSafeEqual(a, b);
 }
 
+function parseRateLimitHeaders(provider: Provider, headers: Headers) {
+    return provider === 'cerebras'
+        ? parseCerebrasHeaders(headers)
+        : parseGroqHeaders(headers);
+}
+
+function toRateLimitSnapshot(parsed: Record<string, number | undefined>): Record<string, string> {
+    const snapshot: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(parsed)) {
+        if (value !== undefined) {
+            snapshot[key] = String(value);
+        }
+    }
+
+    return snapshot;
+}
+
 const server = Bun.serve({
     hostname: config.hostname,
     port: config.port,
@@ -55,6 +75,26 @@ const server = Bun.serve({
             return new Response('ok', { status: 200 });
         }
 
+        if (request.method === 'GET' && pathname === '/ready') {
+            const logicalModel = listAliases()[0] ?? '';
+            const eligibleProviders = (['cerebras', 'groq'] as Provider[]).filter((provider) => (
+                isEligible(provider, logicalModel)
+            ));
+            const unavailableProviders = (['cerebras', 'groq'] as Provider[]).filter((provider) => (
+                !eligibleProviders.includes(provider)
+            ));
+            const ready = eligibleProviders.length > 0;
+            const mode = unavailableProviders.length === 0 ? 'ok' : 'degraded';
+
+            return new Response(
+                JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders }),
+                {
+                    status: ready ? 200 : 503,
+                    headers: { 'Content-Type': 'application/json' },
+                }
+            );
+        }
+
         // --- Auth gate — all routes below require Bearer PERSONAL_PROXY_API_KEY ---
         const token = extractBearerToken(request);
         if (!token || !verifyToken(token, config.personalProxyApiKey)) {
@@ -64,6 +104,17 @@ const server = Bun.serve({
                 'missing_auth',
                 null,
                 401
+            );
+        }
+
+        if (request.method === 'GET' && pathname === '/internal/providers/status') {
+            if (!config.enableInternalStatusEndpoint) {
+                return new Response('Not found', { status: 404 });
+            }
+
+            return new Response(
+                JSON.stringify({ providers: Object.values(getStateSnapshot()) }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
             );
         }
 
@@ -130,20 +181,10 @@ const server = Bun.serve({
                 seed: input.seed ?? null,
             };
 
-            // Phase 1: pick first eligible provider in PROVIDER_ORDER (round-robin is Phase 2)
-            let chosenAlias: string | null = null;
-            let completionResult = null;
-            for (const provider of config.providerOrder) {
-                const upstreamModelId = resolveUpstreamModel(input.model, provider);
-                if (!upstreamModelId) continue;
-                const adapter = adapterMap[provider as keyof typeof adapterMap];
-                if (!adapter) continue;
-                completionResult = await adapter.complete(upstreamModelId, params);
-                chosenAlias = input.model;
-                break;
-            }
+            const candidates = chooseEligibleProviders(input.model);
+            advanceCursor();
 
-            if (!completionResult || !chosenAlias) {
+            if (candidates.length === 0) {
                 return openaiError(
                     'No eligible provider available for the requested model.',
                     'server_error',
@@ -153,12 +194,69 @@ const server = Bun.serve({
                 );
             }
 
-            // Normalize: rewrite upstream model ID to logical alias (spec §15)
-            completionResult.model = chosenAlias;
+            for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
+                const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                if (!upstreamModelId) continue;
+                const adapter = adapterMap[provider];
 
-            return new Response(
-                JSON.stringify(completionResult),
-                { status: 200, headers: { 'Content-Type': 'application/json' } }
+                try {
+                    const { result, headers } = await adapter.complete(upstreamModelId, params);
+                    const parsed = parseRateLimitHeaders(provider, headers);
+                    const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
+
+                    setRateLimitSnapshot(provider, snapshot);
+                    recordSuccess(provider, 200);
+
+                    result.model = input.model;
+
+                    return new Response(
+                        JSON.stringify(result),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } }
+                    );
+                } catch (err) {
+                    const classified = classifyError(err);
+                    recordFailure(provider, classified.status ?? 0);
+
+                    if (!classified.shouldFailover) {
+                        return openaiError(
+                            'Upstream provider rejected the request.',
+                            'invalid_request_error',
+                            'upstream_error',
+                            null,
+                            classified.status ?? 502
+                        );
+                    }
+
+                    if ((classified.status === 429 || classified.status === 498) && classified.headers) {
+                        const parsed = parseRateLimitHeaders(provider, classified.headers);
+                        const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
+                        const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
+                        const cooldownUntil = Date.now() + cooldownMs;
+
+                        setCooldown(provider, cooldownUntil, snapshot);
+                        console.log(JSON.stringify({
+                            event: 'provider_cooldown',
+                            provider,
+                            status: classified.status,
+                            cooldownUntil: new Date(cooldownUntil).toISOString(),
+                        }));
+                        continue;
+                    }
+
+                    console.log(JSON.stringify({
+                        event: 'provider_failover',
+                        provider,
+                        status: classified.status,
+                    }));
+                }
+            }
+
+            return openaiError(
+                'No eligible provider available for the requested model.',
+                'server_error',
+                'no_provider_available',
+                'model',
+                503
             );
         }
 
