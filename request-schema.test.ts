@@ -25,15 +25,15 @@ describe("validateChatCompletion", () => {
         }
     });
 
-    test("stream:true returns success:false with param='stream'", () => {
+    test("stream:true returns success:true", () => {
         const result = validateChatCompletion({
             model: "x",
             messages: [{ role: "user", content: "hi" }],
             stream: true,
         });
-        expect(result.success).toBe(false);
-        if (!result.success) {
-            expect(result.param).toBe("stream");
+        expect(result.success).toBe(true);
+        if (result.success) {
+            expect(result.data.stream).toBe(true);
         }
     });
 });

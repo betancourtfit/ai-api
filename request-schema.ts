@@ -15,8 +15,8 @@ export const chatCompletionSchema = z.strictObject({
     temperature: z.number().min(0).max(2).optional(),
     top_p: z.number().min(0).max(1).optional(),
     max_completion_tokens: z.number().int().positive().optional(),
-    // Phase 1: only false accepted; stream:true returns 400 (D-02; widened to boolean in Phase 2)
-    stream: z.literal(false).optional(),
+    // Phase 2: both non-streaming and streaming requests are supported.
+    stream: z.boolean().optional(),
     stop: z.union([z.string(), z.array(z.string())]).optional(),
     seed: z.number().int().optional(),
     // VALID-06: n is allowed ONLY when it equals 1; z.literal(1) rejects n:2 with path ['n']

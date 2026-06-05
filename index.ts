@@ -67,7 +67,7 @@ function toRateLimitSnapshot(parsed: Record<string, number | undefined>): Record
 const server = Bun.serve({
     hostname: config.hostname,
     port: config.port,
-    async fetch(request) {
+    async fetch(request, server) {
         const { pathname } = new URL(request.url);
 
         // EP-04: GET /health — no auth required (healthcheck para EasyPanel / reverse proxies)
@@ -192,6 +192,106 @@ const server = Bun.serve({
                     'model',
                     503
                 );
+            }
+
+            if (input.stream === true) {
+                const controller = new AbortController();
+                request.signal.addEventListener('abort', () => controller.abort(), { once: true });
+
+                let chosenProvider: Provider | null = null;
+                let sdkStream: AsyncIterable<import('./types').StreamChunk> | null = null;
+
+                for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
+                    const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                    if (!upstreamModelId) continue;
+                    const adapter = adapterMap[provider];
+
+                    try {
+                        sdkStream = await adapter.stream(upstreamModelId, params, controller.signal);
+                        chosenProvider = provider;
+                        break;
+                    } catch (err) {
+                        const classified = classifyError(err);
+                        recordFailure(provider, classified.status ?? 0);
+
+                        if (!classified.shouldFailover) {
+                            return openaiError(
+                                'Upstream provider rejected the request.',
+                                'invalid_request_error',
+                                'upstream_error',
+                                null,
+                                classified.status ?? 502
+                            );
+                        }
+
+                        if ((classified.status === 429 || classified.status === 498) && classified.headers) {
+                            const parsed = parseRateLimitHeaders(provider, classified.headers);
+                            const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
+                            const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
+                            const cooldownUntil = Date.now() + cooldownMs;
+
+                            setCooldown(provider, cooldownUntil, snapshot);
+                            console.log(JSON.stringify({
+                                event: 'provider_cooldown',
+                                provider,
+                                status: classified.status,
+                                cooldownUntil: new Date(cooldownUntil).toISOString(),
+                            }));
+                            continue;
+                        }
+
+                        console.log(JSON.stringify({
+                            event: 'provider_failover',
+                            provider,
+                            status: classified.status,
+                        }));
+                    }
+                }
+
+                if (!sdkStream || !chosenProvider) {
+                    return openaiError(
+                        'No eligible provider available for the requested model.',
+                        'server_error',
+                        'no_provider_available',
+                        'model',
+                        503
+                    );
+                }
+
+                recordSuccess(chosenProvider, 200);
+                server.timeout(request, 0);
+
+                const body = (async function* () {
+                    let firstChunkSent = false;
+
+                    try {
+                        for await (const chunk of sdkStream) {
+                            const normalized = { ...chunk, model: input.model };
+                            firstChunkSent = true;
+                            yield `data: ${JSON.stringify(normalized)}\n\n`;
+                        }
+
+                        yield 'data: [DONE]\n\n';
+                    } catch (err) {
+                        if (!firstChunkSent) {
+                            const classified = classifyError(err);
+                            console.log(JSON.stringify({
+                                event: 'stream_error_before_first_chunk',
+                                provider: chosenProvider,
+                                status: classified.status,
+                            }));
+                        }
+                    }
+                })();
+
+                return new Response(body, {
+                    status: 200,
+                    headers: {
+                        'Content-Type': 'text/event-stream',
+                        'Cache-Control': 'no-cache',
+                        'Connection': 'keep-alive',
+                    },
+                });
             }
 
             for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
