@@ -26,3 +26,24 @@ export function isKnownAlias(alias: string): boolean {
 export function listAliases(): string[] {
     return Object.keys(registry);
 }
+
+// D-07: rewrite upstream model IDs in text back to logical alias — prevents provider ID leak in error messages
+// Sorts by descending upstream ID length for safety (longer IDs matched first to avoid prefix collisions)
+export function rewriteUpstreamModelIds(text: string): string {
+    // Collect all (upstreamId, alias) pairs, sorted by descending upstream ID length
+    const pairs: Array<{ upstreamId: string; alias: string }> = [];
+    for (const alias of listAliases()) {
+        const entry = registry[alias];
+        if (!entry) continue;
+        for (const upstreamId of Object.values(entry)) {
+            pairs.push({ upstreamId, alias });
+        }
+    }
+    pairs.sort((a, b) => b.upstreamId.length - a.upstreamId.length);
+
+    let result = text;
+    for (const { upstreamId, alias } of pairs) {
+        result = result.split(upstreamId).join(alias);
+    }
+    return result;
+}

@@ -61,26 +61,28 @@ export function classifyError(err: unknown): {
     shouldFailover: boolean;
     status: number | undefined;
     headers: HeaderSource | undefined;
+    message: string | undefined;
 } {
     const failoverStatuses = new Set([408, 429, 498, 500, 502, 503, 504]);
     const noFailoverStatuses = new Set([400, 401, 403, 404, 413, 422]);
 
     if (err instanceof GroqAPIError || err instanceof CerebrasAPIError) {
         if (noFailoverStatuses.has(err.status ?? -1)) {
-            return { shouldFailover: false, status: err.status, headers: err.headers };
+            return { shouldFailover: false, status: err.status, headers: err.headers, message: err.message };
         }
 
         if (failoverStatuses.has(err.status ?? -1)) {
-            return { shouldFailover: true, status: err.status, headers: err.headers };
+            return { shouldFailover: true, status: err.status, headers: err.headers, message: err.message };
         }
 
-        return { shouldFailover: true, status: err.status, headers: err.headers };
+        return { shouldFailover: true, status: err.status, headers: err.headers, message: err.message };
     }
 
     return {
         shouldFailover: true,
         status: undefined,
         headers: undefined,
+        message: undefined,
     };
 }
 
