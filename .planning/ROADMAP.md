@@ -29,7 +29,10 @@
   3. `GET /health` returns 200 with no auth; `GET /v1/models` returns `{ "object": "list", "data": [...] }` containing only logical alias IDs.
   4. `POST /v1/chat/completions` with a valid request body returns a complete non-streaming OpenAI-shaped response using one upstream provider SDK.
   5. The old `/chat` endpoint returns 404; no raw provider model IDs appear in any response.
-**Plans:** TBD
+**Plans:** 2 plans (2 waves)
+Plans:
+- [ ] 01-01-PLAN.md — Walking skeleton: dependency cleanup + config + registry + Cerebras adapter + auth + validation wired to one real completion (`bun index.ts`)
+- [ ] 01-02-PLAN.md — Hardening: full strict allowlist/reject-list, Groq adapter (D-01), GET /v1/models, /chat removal, wrong-key 401
 
 ### Phase 2: Routing + Streaming
 **Goal:** Requests are routed across providers via stateful round-robin with cooldown and failover; streaming requests relay SSE chunks to the client without buffering.
@@ -62,11 +65,11 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/? | Not started | - |
+| 1. Foundation | 0/2 | Planned | - |
 | 2. Routing + Streaming | 0/? | Not started | - |
 | 3. Full Compliance + Tests | 0/? | Not started | - |
 
 ---
 
 *Roadmap created: 2026-06-04*
-*Last updated: 2026-06-04 after initial roadmap creation*
+*Last updated: 2026-06-05 after Phase 1 planning (2 plans, 2 waves)*
