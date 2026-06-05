@@ -74,8 +74,16 @@ Plans:
 **Plans:** 3 plans
 Plans:
 
+**Wave 1**
+
 - [ ] 03-01-PLAN.md — Central response normalizer (allowlist-rebuild) wired into both response paths (NORM-01..09)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 03-02-PLAN.md — createServer factory, X-Request-ID everywhere, NORM-10 error sweep + D-07 passthrough, structured logging (OBS-01..05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 03-03-PLAN.md — 12-case integration suite via real server + mocked adapters (TEST-01..12)
 
 ---

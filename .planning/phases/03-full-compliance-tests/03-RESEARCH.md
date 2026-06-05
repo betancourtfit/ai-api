@@ -916,7 +916,7 @@ test("TEST-09+11: non-streaming shape and model alias rewrite", async () => {
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `withRequestId()` mutate or reconstruct?**
    - What we know: HTTP headers on a `Response` object are writable via `.headers.set()` in browsers. Bun's implementation may or may not mirror this.
