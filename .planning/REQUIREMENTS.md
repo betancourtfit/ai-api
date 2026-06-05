@@ -22,12 +22,12 @@
 
 ### OpenAI-Compatible Endpoints
 
-- [ ] **EP-01**: `POST /v1/chat/completions` accepts and processes non-streaming chat completion requests
-- [ ] **EP-02**: `POST /v1/chat/completions` accepts and processes streaming chat completion requests (`"stream": true`)
-- [ ] **EP-03**: `GET /v1/models` returns logical proxy aliases in OpenAI list format (`{ "object": "list", "data": [...] }`)
+- [x] **EP-01**: `POST /v1/chat/completions` accepts and processes non-streaming chat completion requests
+- [x] **EP-02**: `POST /v1/chat/completions` accepts and processes streaming chat completion requests (`"stream": true`)
+- [x] **EP-03**: `GET /v1/models` returns logical proxy aliases in OpenAI list format (`{ "object": "list", "data": [...] }`)
 - [x] **EP-04**: `GET /health` returns liveness response (no auth required)
-- [ ] **EP-05**: `GET /ready` returns readiness status supporting degraded mode (one provider down → `"mode": "degraded"`)
-- [ ] **EP-06**: `GET /internal/providers/status` returns provider state (auth required, controlled by env flag)
+- [x] **EP-05**: `GET /ready` returns readiness status supporting degraded mode (one provider down → `"mode": "degraded"`)
+- [x] **EP-06**: `GET /internal/providers/status` returns provider state (auth required, controlled by env flag)
 - [x] **EP-07**: Old `/chat` endpoint removed
 
 ### Request Contract & Validation
@@ -49,34 +49,34 @@
 
 ### Provider Routing & State
 
-- [ ] **ROUTE-01**: In-memory `ProviderState` tracks per-provider: enabled, configured, healthy, cooldownUntil, consecutiveFailures, lastStatusCode, rateLimitSnapshot
-- [ ] **ROUTE-02**: Provider eligibility check: configured AND enabled AND not in cooldown AND alias maps to provider
-- [ ] **ROUTE-03**: Stateful round-robin selects among eligible providers; cursor advances after each selection
-- [ ] **ROUTE-04**: On provider failure, try next eligible provider before returning error to client
-- [ ] **ROUTE-05**: Failover attempted for: 408, 429, 498, 500, 502, 503, 504
-- [ ] **ROUTE-06**: No failover for: 400, 401, 403, 404, 413, 422 (these indicate client or config errors)
-- [ ] **ROUTE-07**: When no eligible provider exists, return 503 with OpenAI-shaped error body
-- [ ] **ROUTE-08**: Provider state module exports `resetForTesting()` for test isolation
+- [x] **ROUTE-01**: In-memory `ProviderState` tracks per-provider: enabled, configured, healthy, cooldownUntil, consecutiveFailures, lastStatusCode, rateLimitSnapshot
+- [x] **ROUTE-02**: Provider eligibility check: configured AND enabled AND not in cooldown AND alias maps to provider
+- [x] **ROUTE-03**: Stateful round-robin selects among eligible providers; cursor advances after each selection
+- [x] **ROUTE-04**: On provider failure, try next eligible provider before returning error to client
+- [x] **ROUTE-05**: Failover attempted for: 408, 429, 498, 500, 502, 503, 504
+- [x] **ROUTE-06**: No failover for: 400, 401, 403, 404, 413, 422 (these indicate client or config errors)
+- [x] **ROUTE-07**: When no eligible provider exists, return 503 with OpenAI-shaped error body
+- [x] **ROUTE-08**: Provider state module exports `resetForTesting()` for test isolation
 
 ### Rate-Limit & Cooldown
 
-- [ ] **RL-01**: Cerebras rate-limit headers parsed from each response: `x-ratelimit-remaining-requests-day`, `x-ratelimit-remaining-tokens-minute`, `x-ratelimit-reset-requests-day`, `x-ratelimit-reset-tokens-minute` (float seconds format)
-- [ ] **RL-02**: Groq rate-limit headers parsed from each response: `x-ratelimit-remaining-requests`, `x-ratelimit-remaining-tokens`, `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens` (duration string format e.g. `"2m59.56s"`), `retry-after` (seconds, 429 only)
-- [ ] **RL-03**: Groq and Cerebras use separate header parsers (formats differ — cannot share a generic parser)
-- [ ] **RL-04**: On 429, cooldown calculated as `max(retryAfter, resetTokensSeconds, DEFAULT_COOLDOWN_SECONDS)` and provider marked unavailable until then
-- [ ] **RL-05**: Provider returns to eligible rotation automatically when `Date.now() >= cooldownUntil`
-- [ ] **RL-06**: Groq 498 ("Flex Tier Capacity Exceeded") treated as failover trigger (same as 429)
-- [ ] **RL-07**: Cooldown events logged with provider, reason, and expiration time
+- [x] **RL-01**: Cerebras rate-limit headers parsed from each response: `x-ratelimit-remaining-requests-day`, `x-ratelimit-remaining-tokens-minute`, `x-ratelimit-reset-requests-day`, `x-ratelimit-reset-tokens-minute` (float seconds format)
+- [x] **RL-02**: Groq rate-limit headers parsed from each response: `x-ratelimit-remaining-requests`, `x-ratelimit-remaining-tokens`, `x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens` (duration string format e.g. `"2m59.56s"`), `retry-after` (seconds, 429 only)
+- [x] **RL-03**: Groq and Cerebras use separate header parsers (formats differ — cannot share a generic parser)
+- [x] **RL-04**: On 429, cooldown calculated as `max(retryAfter, resetTokensSeconds, DEFAULT_COOLDOWN_SECONDS)` and provider marked unavailable until then
+- [x] **RL-05**: Provider returns to eligible rotation automatically when `Date.now() >= cooldownUntil`
+- [x] **RL-06**: Groq 498 ("Flex Tier Capacity Exceeded") treated as failover trigger (same as 429)
+- [x] **RL-07**: Cooldown events logged with provider, reason, and expiration time
 
 ### Streaming Relay
 
-- [ ] **STREAM-01**: `POST /v1/chat/completions` with `"stream": true` returns `Content-Type: text/event-stream`
-- [ ] **STREAM-02**: SSE relay implemented as async generator — no response buffering
-- [ ] **STREAM-03**: `server.timeout(req, 0)` called before returning streaming Response (prevents Bun 10s idle timeout killing quiet LLM streams)
-- [ ] **STREAM-04**: `firstChunkSent` flag set before first chunk yield; no failover attempted after first chunk sent
-- [ ] **STREAM-05**: Upstream abort signal connected to downstream client disconnect
-- [ ] **STREAM-06**: Final `data: [DONE]\n\n` sentinel preserved in relay
-- [ ] **STREAM-07**: Each chunk normalized inline (model rewrite, reasoning strip) before yielding — not post-stream
+- [x] **STREAM-01**: `POST /v1/chat/completions` with `"stream": true` returns `Content-Type: text/event-stream`
+- [x] **STREAM-02**: SSE relay implemented as async generator — no response buffering
+- [x] **STREAM-03**: `server.timeout(req, 0)` called before returning streaming Response (prevents Bun 10s idle timeout killing quiet LLM streams)
+- [x] **STREAM-04**: `firstChunkSent` flag set before first chunk yield; no failover attempted after first chunk sent
+- [x] **STREAM-05**: Upstream abort signal connected to downstream client disconnect
+- [x] **STREAM-06**: Final `data: [DONE]\n\n` sentinel preserved in relay
+- [x] **STREAM-07**: Each chunk normalized inline (model rewrite, reasoning strip) before yielding — not post-stream
 
 ### Response Normalization
 
@@ -167,33 +167,33 @@
 | REG-02 | Phase 1 | Complete |
 | REG-03 | Phase 1 | Complete |
 | REG-04 | Phase 1 | Complete |
-| ROUTE-01 | Phase 2 | Pending |
-| ROUTE-02 | Phase 2 | Pending |
-| ROUTE-03 | Phase 2 | Pending |
-| ROUTE-04 | Phase 2 | Pending |
-| ROUTE-05 | Phase 2 | Pending |
-| ROUTE-06 | Phase 2 | Pending |
-| ROUTE-07 | Phase 2 | Pending |
-| ROUTE-08 | Phase 2 | Pending |
-| RL-01 | Phase 2 | Pending |
-| RL-02 | Phase 2 | Pending |
-| RL-03 | Phase 2 | Pending |
-| RL-04 | Phase 2 | Pending |
-| RL-05 | Phase 2 | Pending |
-| RL-06 | Phase 2 | Pending |
-| RL-07 | Phase 2 | Pending |
-| STREAM-01 | Phase 2 | Pending |
-| STREAM-02 | Phase 2 | Pending |
-| STREAM-03 | Phase 2 | Pending |
-| STREAM-04 | Phase 2 | Pending |
-| STREAM-05 | Phase 2 | Pending |
-| STREAM-06 | Phase 2 | Pending |
-| STREAM-07 | Phase 2 | Pending |
-| EP-01 | Phase 2 | Pending |
-| EP-02 | Phase 2 | Pending |
-| EP-03 | Phase 2 | Pending |
-| EP-05 | Phase 2 | Pending |
-| EP-06 | Phase 2 | Pending |
+| ROUTE-01 | Phase 2 | Complete |
+| ROUTE-02 | Phase 2 | Complete |
+| ROUTE-03 | Phase 2 | Complete |
+| ROUTE-04 | Phase 2 | Complete |
+| ROUTE-05 | Phase 2 | Complete |
+| ROUTE-06 | Phase 2 | Complete |
+| ROUTE-07 | Phase 2 | Complete |
+| ROUTE-08 | Phase 2 | Complete |
+| RL-01 | Phase 2 | Complete |
+| RL-02 | Phase 2 | Complete |
+| RL-03 | Phase 2 | Complete |
+| RL-04 | Phase 2 | Complete |
+| RL-05 | Phase 2 | Complete |
+| RL-06 | Phase 2 | Complete |
+| RL-07 | Phase 2 | Complete |
+| STREAM-01 | Phase 2 | Complete |
+| STREAM-02 | Phase 2 | Complete |
+| STREAM-03 | Phase 2 | Complete |
+| STREAM-04 | Phase 2 | Complete |
+| STREAM-05 | Phase 2 | Complete |
+| STREAM-06 | Phase 2 | Complete |
+| STREAM-07 | Phase 2 | Complete |
+| EP-01 | Phase 2 | Complete |
+| EP-02 | Phase 2 | Complete |
+| EP-03 | Phase 2 | Complete |
+| EP-05 | Phase 2 | Complete |
+| EP-06 | Phase 2 | Complete |
 | NORM-01 | Phase 3 | Pending |
 | NORM-02 | Phase 3 | Pending |
 | NORM-03 | Phase 3 | Pending |
@@ -221,13 +221,17 @@
 | TEST-10 | Phase 3 | Pending |
 | TEST-11 | Phase 3 | Pending |
 | TEST-12 | Phase 3 | Pending |
+| EXT-01 | v2 | Pending |
+| EXT-02 | v2 | Pending |
+| EXT-03 | v2 | Pending |
+| EXT-04 | v2 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 76 total (file header said 56 — body count is authoritative)
-- Mapped to phases: 76
+- Total requirements: 80 (76 v1 + 4 v2)
+- Mapped to implementation buckets: 80
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-06-04*
-*Last updated: 2026-06-04 after roadmap creation — traceability populated*
+*Last updated: 2026-06-05 after Phase 2 completion — traceability updated*

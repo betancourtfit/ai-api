@@ -11,7 +11,7 @@
 ## Phases
 
 - [x] **Phase 1: Foundation** - Working non-streaming endpoint with auth, validation, model registry, and one provider call (completed 2026-06-05)
-- [ ] **Phase 2: Routing + Streaming** - Stateful round-robin, cooldown, rate-limit parsing, SSE relay, and all /v1 endpoints
+- [x] **Phase 2: Routing + Streaming** - Stateful round-robin, cooldown, rate-limit parsing, SSE relay, and all /v1 endpoints (completed 2026-06-05)
 - [ ] **Phase 3: Full Compliance + Tests** - Complete normalization, observability, diagnostic endpoints, and full test coverage
 
 ---
@@ -52,7 +52,11 @@ Plans:
   4. `POST /v1/chat/completions` with `"stream": true` returns `Content-Type: text/event-stream`, relays chunks without buffering, and terminates with `data: [DONE]`.
   5. `GET /ready` returns `"mode": "degraded"` when one provider is down and `"mode": "ok"` when both are healthy; `GET /internal/providers/status` returns provider state only to authenticated callers.
 
-**Plans:** TBD
+**Plans:** 2/2 plans complete
+Plans:
+
+- [x] 02-01-PLAN.md — provider state, round-robin routing, cooldown parsing, failover classification, `/ready`, and `/internal/providers/status`
+- [x] 02-02-PLAN.md — streaming adapter contracts, schema widening, SSE relay, disconnect abort, and live verification hardening
 
 ### Phase 3: Full Compliance + Tests
 
@@ -76,10 +80,10 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete    | 2026-06-05 |
-| 2. Routing + Streaming | 0/? | Not started | - |
-| 3. Full Compliance + Tests | 0/? | Not started | - |
+| 2. Routing + Streaming | 2/2 | Complete    | 2026-06-05 |
+| 3. Full Compliance + Tests | 0/? | Ready to plan | - |
 
 ---
 
 *Roadmap created: 2026-06-04*
-*Last updated: 2026-06-05 after Phase 1 planning (2 plans, 2 waves)*
+*Last updated: 2026-06-05 after Phase 2 completion (2 plans, 2 waves)*
