@@ -7,45 +7,45 @@
 
 ### Infrastructure & Dependencies
 
-- [ ] **INFRA-01**: groq-sdk upgraded to ^1.2.1 (current pin ^0.37.0 is a major version behind)
-- [ ] **INFRA-02**: `cerebras` CLI binary package removed from dependencies (~40MB dead weight, not imported)
-- [ ] **INFRA-03**: Both SDK clients initialized with `maxRetries: 0` (SDK auto-retries fight proxy failover)
-- [ ] **INFRA-04**: Zod v4 (`^4.4.3`) installed for request validation
-- [ ] **INFRA-05**: Config module loads all env vars with validation and typed exports — no process.env spread across files
+- [x] **INFRA-01**: groq-sdk upgraded to ^1.2.1 (current pin ^0.37.0 is a major version behind)
+- [x] **INFRA-02**: `cerebras` CLI binary package removed from dependencies (~40MB dead weight, not imported)
+- [x] **INFRA-03**: Both SDK clients initialized with `maxRetries: 0` (SDK auto-retries fight proxy failover)
+- [x] **INFRA-04**: Zod v4 (`^4.4.3`) installed for request validation
+- [x] **INFRA-05**: Config module loads all env vars with validation and typed exports — no process.env spread across files
 
 ### Authentication
 
-- [ ] **AUTH-01**: Proxy rejects requests missing `Authorization: Bearer <key>` header with 401 and OpenAI-shaped error body
-- [ ] **AUTH-02**: Proxy rejects requests with invalid proxy key with 401 and OpenAI-shaped error body
-- [ ] **AUTH-03**: Key comparison uses constant-time comparison (`crypto.timingSafeEqual`) not string equality
-- [ ] **AUTH-04**: Auth middleware never logs or echoes the Authorization header value
+- [x] **AUTH-01**: Proxy rejects requests missing `Authorization: Bearer <key>` header with 401 and OpenAI-shaped error body
+- [x] **AUTH-02**: Proxy rejects requests with invalid proxy key with 401 and OpenAI-shaped error body
+- [x] **AUTH-03**: Key comparison uses constant-time comparison (`crypto.timingSafeEqual`) not string equality
+- [x] **AUTH-04**: Auth middleware never logs or echoes the Authorization header value
 
 ### OpenAI-Compatible Endpoints
 
 - [ ] **EP-01**: `POST /v1/chat/completions` accepts and processes non-streaming chat completion requests
 - [ ] **EP-02**: `POST /v1/chat/completions` accepts and processes streaming chat completion requests (`"stream": true`)
 - [ ] **EP-03**: `GET /v1/models` returns logical proxy aliases in OpenAI list format (`{ "object": "list", "data": [...] }`)
-- [ ] **EP-04**: `GET /health` returns liveness response (no auth required)
+- [x] **EP-04**: `GET /health` returns liveness response (no auth required)
 - [ ] **EP-05**: `GET /ready` returns readiness status supporting degraded mode (one provider down → `"mode": "degraded"`)
 - [ ] **EP-06**: `GET /internal/providers/status` returns provider state (auth required, controlled by env flag)
-- [ ] **EP-07**: Old `/chat` endpoint removed
+- [x] **EP-07**: Old `/chat` endpoint removed
 
 ### Request Contract & Validation
 
-- [ ] **VALID-01**: `model` field validated against logical model registry; unknown aliases return 400
-- [ ] **VALID-02**: `messages` field required; missing returns 400
-- [ ] **VALID-03**: Allowlisted fields forwarded: `model`, `messages`, `temperature`, `top_p`, `max_completion_tokens`, `stream`, `stop`, `seed`
-- [ ] **VALID-04**: Unsupported fields rejected with 400 before reaching any upstream provider: `logprobs`, `logit_bias`, `top_logprobs`
-- [ ] **VALID-05**: `messages[].name` field rejected with 400
-- [ ] **VALID-06**: `n != 1` (or `n > 1`) rejected with 400
-- [ ] **VALID-07**: Unknown/unlisted request fields rejected with 400 (strict allowlist, no silent pass-through)
+- [x] **VALID-01**: `model` field validated against logical model registry; unknown aliases return 400
+- [x] **VALID-02**: `messages` field required; missing returns 400
+- [x] **VALID-03**: Allowlisted fields forwarded: `model`, `messages`, `temperature`, `top_p`, `max_completion_tokens`, `stream`, `stop`, `seed`
+- [x] **VALID-04**: Unsupported fields rejected with 400 before reaching any upstream provider: `logprobs`, `logit_bias`, `top_logprobs`
+- [x] **VALID-05**: `messages[].name` field rejected with 400
+- [x] **VALID-06**: `n != 1` (or `n > 1`) rejected with 400
+- [x] **VALID-07**: Unknown/unlisted request fields rejected with 400 (strict allowlist, no silent pass-through)
 
 ### Logical Model Registry
 
-- [ ] **REG-01**: Model registry loaded from `MODEL_REGISTRY_JSON` env var
-- [ ] **REG-02**: Initial alias `gpt-oss-120b-balanced` maps to `gpt-oss-120b` (Cerebras) and `openai/gpt-oss-120b` (Groq)
-- [ ] **REG-03**: A logical alias only routes to providers where that alias has a mapping
-- [ ] **REG-04**: `GET /v1/models` returns logical alias IDs only — never raw provider model IDs
+- [x] **REG-01**: Model registry loaded from `MODEL_REGISTRY_JSON` env var
+- [x] **REG-02**: Initial alias `gpt-oss-120b-balanced` maps to `gpt-oss-120b` (Cerebras) and `openai/gpt-oss-120b` (Groq)
+- [x] **REG-03**: A logical alias only routes to providers where that alias has a mapping
+- [x] **REG-04**: `GET /v1/models` returns logical alias IDs only — never raw provider model IDs
 
 ### Provider Routing & State
 
@@ -145,28 +145,28 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | Phase 1 | Pending |
-| INFRA-02 | Phase 1 | Pending |
-| INFRA-03 | Phase 1 | Pending |
-| INFRA-04 | Phase 1 | Pending |
-| INFRA-05 | Phase 1 | Pending |
-| AUTH-01 | Phase 1 | Pending |
-| AUTH-02 | Phase 1 | Pending |
-| AUTH-03 | Phase 1 | Pending |
-| AUTH-04 | Phase 1 | Pending |
-| EP-04 | Phase 1 | Pending |
-| EP-07 | Phase 1 | Pending |
-| VALID-01 | Phase 1 | Pending |
-| VALID-02 | Phase 1 | Pending |
-| VALID-03 | Phase 1 | Pending |
-| VALID-04 | Phase 1 | Pending |
-| VALID-05 | Phase 1 | Pending |
-| VALID-06 | Phase 1 | Pending |
-| VALID-07 | Phase 1 | Pending |
-| REG-01 | Phase 1 | Pending |
-| REG-02 | Phase 1 | Pending |
-| REG-03 | Phase 1 | Pending |
-| REG-04 | Phase 1 | Pending |
+| INFRA-01 | Phase 1 | Complete |
+| INFRA-02 | Phase 1 | Complete |
+| INFRA-03 | Phase 1 | Complete |
+| INFRA-04 | Phase 1 | Complete |
+| INFRA-05 | Phase 1 | Complete |
+| AUTH-01 | Phase 1 | Complete |
+| AUTH-02 | Phase 1 | Complete |
+| AUTH-03 | Phase 1 | Complete |
+| AUTH-04 | Phase 1 | Complete |
+| EP-04 | Phase 1 | Complete |
+| EP-07 | Phase 1 | Complete |
+| VALID-01 | Phase 1 | Complete |
+| VALID-02 | Phase 1 | Complete |
+| VALID-03 | Phase 1 | Complete |
+| VALID-04 | Phase 1 | Complete |
+| VALID-05 | Phase 1 | Complete |
+| VALID-06 | Phase 1 | Complete |
+| VALID-07 | Phase 1 | Complete |
+| REG-01 | Phase 1 | Complete |
+| REG-02 | Phase 1 | Complete |
+| REG-03 | Phase 1 | Complete |
+| REG-04 | Phase 1 | Complete |
 | ROUTE-01 | Phase 2 | Pending |
 | ROUTE-02 | Phase 2 | Pending |
 | ROUTE-03 | Phase 2 | Pending |
@@ -223,6 +223,7 @@
 | TEST-12 | Phase 3 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 76 total (file header said 56 — body count is authoritative)
 - Mapped to phases: 76
 - Unmapped: 0 ✓
