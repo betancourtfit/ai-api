@@ -13,7 +13,7 @@
 - [x] **Phase 1: Foundation** - Working non-streaming endpoint with auth, validation, model registry, and one provider call (completed 2026-06-05)
 - [x] **Phase 2: Routing + Streaming** - Stateful round-robin, cooldown, rate-limit parsing, SSE relay, and all /v1 endpoints (completed 2026-06-05)
 - [x] **Phase 3: Full Compliance + Tests** - Complete normalization, observability, diagnostic endpoints, and full test coverage (completed 2026-06-05)
-- [ ] **Phase 4: Audio Foundation** - Config env vars, Zod schema, validation rules, and maxRequestBodySize fix — no whisper binary required
+- [x] **Phase 4: Audio Foundation** - Config env vars, Zod schema, validation rules, and maxRequestBodySize fix — no whisper binary required (completed 2026-06-06)
 - [ ] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage
 - [ ] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field
 
@@ -101,11 +101,11 @@ Plans:
   3. `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, and `AUDIO_MAX_FILE_BYTES` are read from environment and surfaced in the config object; a missing `WHISPER_MODEL_ALIAS` does not crash the server.
   4. `maxRequestBodySize` in `Bun.serve()` is raised to the configured audio limit without changing the 1 MiB chat-completion behavior.
 
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 
-- [ ] 04-01-PLAN.md — Audio foundation: whisper/audio config fields, AudioTranscriptionResult type, Zod audio-schema validators + unit tests, maxRequestBodySize raise + 1 MiB chat gate
+- [x] 04-01-PLAN.md — Audio foundation: whisper/audio config fields, AudioTranscriptionResult type, Zod audio-schema validators + unit tests, maxRequestBodySize raise + 1 MiB chat gate
 
 ### Phase 5: Transcription Route + Auth + Tests
 
@@ -145,7 +145,7 @@ Plans:
 | 1. Foundation | 2/2 | Complete | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete | 2026-06-05 |
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
-| 4. Audio Foundation | 0/? | Not started | - |
+| 4. Audio Foundation | 1/1 | Complete   | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 0/? | Not started | - |
 | 6. Whisper Sidecar + Models + Ready | 0/? | Not started | - |
 
