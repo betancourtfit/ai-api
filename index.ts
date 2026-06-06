@@ -326,13 +326,20 @@ export function createServer(
                                 ));
                             }
 
-                            if ((classified.status === 429 || classified.status === 498) && classified.headers) {
-                                const parsed = parseRateLimitHeaders(provider, classified.headers);
-                                const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
+                            if (classified.status === 429 || classified.status === 498) {
+                                // CR-02: always apply cooldown — use DEFAULT_COOLDOWN_SECONDS
+                                // when headers are absent (CLAUDE.md §13.3)
+                                const parsed = classified.headers
+                                    ? parseRateLimitHeaders(provider, classified.headers)
+                                    : {};
+                                const snapshot = classified.headers
+                                    ? toRateLimitSnapshot(parsed as Record<string, number | undefined>)
+                                    : {};
                                 const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
                                 const cooldownUntil = Date.now() + cooldownMs;
 
-                                setCooldown(provider, cooldownUntil, snapshot);
+                                setCooldown(provider, cooldownUntil,
+                                    Object.keys(snapshot).length > 0 ? snapshot : undefined);
                                 failoverReason = `status_${classified.status}`;
                                 log('warn', {
                                     event: 'provider_cooldown',
@@ -533,13 +540,20 @@ export function createServer(
                             ));
                         }
 
-                        if ((classified.status === 429 || classified.status === 498) && classified.headers) {
-                            const parsed = parseRateLimitHeaders(provider, classified.headers);
-                            const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
+                        if (classified.status === 429 || classified.status === 498) {
+                            // CR-02: always apply cooldown — use DEFAULT_COOLDOWN_SECONDS
+                            // when headers are absent (CLAUDE.md §13.3)
+                            const parsed = classified.headers
+                                ? parseRateLimitHeaders(provider, classified.headers)
+                                : {};
+                            const snapshot = classified.headers
+                                ? toRateLimitSnapshot(parsed as Record<string, number | undefined>)
+                                : {};
                             const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
                             const cooldownUntil = Date.now() + cooldownMs;
 
-                            setCooldown(provider, cooldownUntil, snapshot);
+                            setCooldown(provider, cooldownUntil,
+                                Object.keys(snapshot).length > 0 ? snapshot : undefined);
                             failoverReason = `status_${classified.status}`;
                             log('warn', {
                                 event: 'provider_cooldown',
