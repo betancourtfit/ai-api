@@ -126,7 +126,7 @@ function readHeader(headers: HeaderSource, name: string): string | null {
 }
 
 function parseDuration(value: string | null): number | undefined {
-    if (!value) return undefined;
+    if (value === null || value === '') return undefined; // WR-04: explicit guard — !value would miss '' after a refactor to string|undefined
 
     const match = value.match(/^(?:(\d+)m)?(?:([0-9.]+)s)?$/);
     if (!match) return undefined;
