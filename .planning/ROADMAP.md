@@ -141,15 +141,15 @@ Plans:
   3. A `curl` smoke test against a running whisper-server instance returns `{ "text": "..." }` through the proxy with HTTP 200; when the sidecar is stopped, the same request returns 503 with an OpenAI-shaped error body, and chat-completion requests continue to succeed.
   4. Zero new npm packages are added; all sidecar communication uses `fetch()` and `FormData` from the Bun runtime.
 
-**Plans:** 3 plans
+**Plans:** 2/3 plans executed
 
 **Wave 1**
 
-- [ ] 06-01-PLAN.md — HttpWhisperService + health() interface method + fake-sidecar unit tests (WHSP-01, WHSP-02, WHSP-03)
+- [x] 06-01-PLAN.md — HttpWhisperService + health() interface method + fake-sidecar unit tests (WHSP-01, WHSP-02, WHSP-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02-PLAN.md — /v1/models alias append + /ready whisperAvailable + import.meta.main selection + integration tests (EP2-02, EP2-03)
+- [x] 06-02-PLAN.md — /v1/models alias append + /ready whisperAvailable + import.meta.main selection + integration tests (EP2-02, EP2-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -166,7 +166,7 @@ Plans:
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
 | 4. Audio Foundation | 3/3 | Complete   | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 2/2 | Complete    | 2026-06-06 |
-| 6. Whisper Sidecar + Models + Ready | 0/3 | Planned | - |
+| 6. Whisper Sidecar + Models + Ready | 2/3 | In Progress|  |
 
 ---
 
