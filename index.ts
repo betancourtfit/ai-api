@@ -386,7 +386,6 @@ export function createServer(
                         ));
                     }
 
-                    recordSuccess(chosenProvider, 200);
                     server.timeout(request, 0);
 
                     // Capture for closure (TypeScript narrowing)
@@ -405,8 +404,19 @@ export function createServer(
                                 if (!hasVisibleChunkData(normalized)) {
                                     continue;
                                 }
-                                firstChunkSent = true;
+                                if (!firstChunkSent) {
+                                    // WR-01: record success only after first real data is received —
+                                    // adapter.stream() resolves without consuming bytes, so a
+                                    // stream-open failure would commit a false success record.
+                                    recordSuccess(finalProvider, 200);
+                                    firstChunkSent = true;
+                                }
                                 yield `data: ${JSON.stringify(normalized)}\n\n`;
+                            }
+
+                            // WR-01: if stream completed without any visible chunks, still mark success
+                            if (!firstChunkSent) {
+                                recordSuccess(finalProvider, 200);
                             }
 
                             yield 'data: [DONE]\n\n';
