@@ -8,7 +8,7 @@
 
 ### Endpoint
 
-- [ ] **EP2-01**: User can POST multipart/form-data to `/v1/audio/transcriptions` with a `file` (audio) and `model` (string) field
+- [x] **EP2-01**: User can POST multipart/form-data to `/v1/audio/transcriptions` with a `file` (audio) and `model` (string) field
 - [ ] **EP2-02**: User can GET `/v1/models` and see the whisper alias when whisper-server is configured
 - [ ] **EP2-03**: User can GET `/ready` and see a `whisperAvailable` boolean field reflecting sidecar health
 
@@ -31,23 +31,23 @@
 
 ### Auth & Security
 
-- [ ] **AUTH2-01**: POST /v1/audio/transcriptions requires valid Bearer token; returns 401 if missing or invalid (reuses existing auth middleware)
-- [ ] **AUTH2-02**: Proxy never logs audio file content, filenames, or transcribed text
+- [x] **AUTH2-01**: POST /v1/audio/transcriptions requires valid Bearer token; returns 401 if missing or invalid (reuses existing auth middleware)
+- [x] **AUTH2-02**: Proxy never logs audio file content, filenames, or transcribed text
 
 ### Observability
 
-- [ ] **OBS2-01**: Every transcription response carries `X-Request-ID` header (reuses existing middleware)
-- [ ] **OBS2-02**: Structured log per transcription request: requestId, latencyMs, fileSize, modelAlias, status — no audio content logged
+- [x] **OBS2-01**: Every transcription response carries `X-Request-ID` header (reuses existing middleware)
+- [x] **OBS2-02**: Structured log per transcription request: requestId, latencyMs, fileSize, modelAlias, status — no audio content logged
 
 ### Tests
 
-- [ ] **TEST2-01**: 401 returned on missing or invalid auth token
-- [ ] **TEST2-02**: 400 returned when `file` field is absent
-- [ ] **TEST2-03**: 400 returned when `model` is an unknown alias
-- [ ] **TEST2-04**: 413 returned when file exceeds 25 MB
-- [ ] **TEST2-05**: 400 returned when request contains unknown fields
-- [ ] **TEST2-06**: 200 with `{ text: "..." }` returned when mock whisper service returns a transcript
-- [ ] **TEST2-07**: 503 returned when whisper service reports unavailable
+- [x] **TEST2-01**: 401 returned on missing or invalid auth token
+- [x] **TEST2-02**: 400 returned when `file` field is absent
+- [x] **TEST2-03**: 400 returned when `model` is an unknown alias
+- [x] **TEST2-04**: 413 returned when file exceeds 25 MB
+- [x] **TEST2-05**: 400 returned when request contains unknown fields
+- [x] **TEST2-06**: 200 with `{ text: "..." }` returned when mock whisper service returns a transcript
+- [x] **TEST2-07**: 503 returned when whisper service reports unavailable
 
 ---
 
@@ -76,18 +76,18 @@
 | AUDIO-06 | Phase 4 | Complete |
 | WHSP-04 | Phase 4 | Complete |
 | WHSP-05 | Phase 4 | Complete |
-| EP2-01 | Phase 5 | Pending |
-| AUTH2-01 | Phase 5 | Pending |
-| AUTH2-02 | Phase 5 | Pending |
-| OBS2-01 | Phase 5 | Pending |
-| OBS2-02 | Phase 5 | Pending |
-| TEST2-01 | Phase 5 | Pending |
-| TEST2-02 | Phase 5 | Pending |
-| TEST2-03 | Phase 5 | Pending |
-| TEST2-04 | Phase 5 | Pending |
-| TEST2-05 | Phase 5 | Pending |
-| TEST2-06 | Phase 5 | Pending |
-| TEST2-07 | Phase 5 | Pending |
+| EP2-01 | Phase 5 | Complete |
+| AUTH2-01 | Phase 5 | Complete |
+| AUTH2-02 | Phase 5 | Complete |
+| OBS2-01 | Phase 5 | Complete |
+| OBS2-02 | Phase 5 | Complete |
+| TEST2-01 | Phase 5 | Complete |
+| TEST2-02 | Phase 5 | Complete |
+| TEST2-03 | Phase 5 | Complete |
+| TEST2-04 | Phase 5 | Complete |
+| TEST2-05 | Phase 5 | Complete |
+| TEST2-06 | Phase 5 | Complete |
+| TEST2-07 | Phase 5 | Complete |
 | EP2-02 | Phase 6 | Pending |
 | EP2-03 | Phase 6 | Pending |
 | WHSP-01 | Phase 6 | Pending |
