@@ -428,32 +428,38 @@ export function createServer(
                                 usage: streamUsage,
                             });
                         } catch (err) {
-                            if (!firstChunkSent) {
-                                const classified = classifyError(err);
-                                log('warn', {
-                                    event: 'stream_error_before_first_chunk',
-                                    requestId,
-                                    provider: finalProvider,
-                                    status: classified.status,
-                                });
+                            // CR-03: log and emit [DONE] unconditionally regardless of firstChunkSent.
+                            // When firstChunkSent=true, a mid-stream error must still close the SSE
+                            // stream gracefully so clients don't hang waiting for the sentinel.
+                            const classified = classifyError(err);
+                            log('warn', {
+                                event: firstChunkSent
+                                    ? 'stream_error_after_first_chunk'
+                                    : 'stream_error_before_first_chunk',
+                                requestId,
+                                provider: finalProvider,
+                                status: classified.status,
+                            });
 
-                                // OBS-02: emit error log for stream errors before first chunk
-                                log('info', {
-                                    event: 'request_complete',
-                                    requestId,
-                                    timestamp: new Date(requestStart).toISOString(),
-                                    route: `${request.method} ${pathname}`,
-                                    logicalAlias: input.model,
-                                    provider: finalProvider,
-                                    upstreamModelId: finalUpstreamModelId,
-                                    attempt: finalAttemptCount,
-                                    streaming: true,
-                                    statusCode: classified.status ?? 500,
-                                    latencyMs: Date.now() - requestStart,
-                                    failoverReason: finalFailoverReason,
-                                    usage: streamUsage,
-                                });
-                            }
+                            // OBS-02: emit request-complete log for all stream error paths
+                            log('info', {
+                                event: 'request_complete',
+                                requestId,
+                                timestamp: new Date(requestStart).toISOString(),
+                                route: `${request.method} ${pathname}`,
+                                logicalAlias: input.model,
+                                provider: finalProvider,
+                                upstreamModelId: finalUpstreamModelId,
+                                attempt: finalAttemptCount,
+                                streaming: true,
+                                statusCode: classified.status ?? 500,
+                                latencyMs: Date.now() - requestStart,
+                                failoverReason: finalFailoverReason,
+                                usage: streamUsage,
+                            });
+
+                            // Always emit [DONE] — SSE protocol requires the sentinel even on error
+                            yield 'data: [DONE]\n\n';
                         }
                     })();
 
