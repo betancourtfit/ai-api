@@ -159,6 +159,7 @@ describe("classifyError", () => {
             shouldFailover: true,
             status: undefined,
             headers: undefined,
+            message: undefined, // WR-06: complete assertion — ensures message is not accidentally set for unknown errors
         });
     });
 });
