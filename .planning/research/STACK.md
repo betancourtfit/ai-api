@@ -1,389 +1,356 @@
-# Stack Research: OpenAI-Compatible Proxy Middleware in Bun
+# Stack Research: Local Audio Transcription
 
-**Project:** bun-ai-api — Cerebras + Groq proxy  
-**Researched:** 2026-06-04  
-**Sources:** Context7 (groq-typescript, oven-sh/bun, colinhacks/zod, cerebras-cloud-sdk-node), official Groq rate-limit docs, official Cerebras rate-limit docs, npm registry
-
----
-
-## Recommended Stack
-
-| Library | Version | Purpose | Confidence |
-|---------|---------|---------|------------|
-| `bun` runtime | >=1.1.29 (prod), >=1.3.11 (dev) | HTTP server, SSE, test runner, env loading | HIGH |
-| `groq-sdk` (`groq-sdk` on npm) | ^1.2.1 (latest: 1.2.1) | Groq upstream calls, streaming, error types | HIGH |
-| `@cerebras/cerebras_cloud_sdk` | ^1.64.1 (latest: 1.64.1) | Cerebras upstream calls, streaming | HIGH |
-| `zod` | ^4.4.3 (latest stable: 4.4.3) | Request body validation, schema inference | HIGH |
-| `@types/bun` | latest (1.3.5 resolved) | Bun runtime TypeScript types | HIGH |
-| `typescript` | ^5 (peer) | Type checking — Bun transpiles natively, no emit | HIGH |
-
-**No additional runtime dependencies are needed.** Logging, UUID generation, SSE, env loading, and the test runner are all covered by Bun built-ins or the two provider SDKs.
+**Project:** bun-ai-api — POST /v1/audio/transcriptions milestone
+**Researched:** 2026-06-06
+**Scope:** New additions only — existing Bun/Zod/groq-sdk/cerebras_cloud_sdk stack is unchanged
 
 ---
 
-## Key Library Details
+## Recommended Whisper Backend
 
-### Bun.serve() — SSE Streaming Relay
+**whisper-server (built into whisper.cpp) via HTTP sidecar — not CLI subprocess**
 
-**Pattern: async generator (preferred for relay)**
+This is the pivotal architectural choice. whisper.cpp ships a built-in HTTP server
+(`whisper-server` binary) that exposes an OpenAI-compatible transcription endpoint.
+Running it as a local sidecar process eliminates the need for per-request subprocess
+spawning, temp-file management of WAV intermediates, and JSON-from-file parsing.
 
-Bun supports two SSE patterns. The async generator form is the right choice for a relay because it lets you `yield` each chunk from the upstream SDK iterator directly, and Bun cancels the generator automatically on client disconnect:
+### Why whisper-server sidecar beats CLI subprocess
 
-```typescript
-// routes/chat.ts
-Bun.serve({
-  routes: {
-    "/v1/chat/completions": async (req, server) => {
-      server.timeout(req, 0); // REQUIRED: default idle timeout is 10s
-      // ...parse and auth...
+| Factor | CLI subprocess (whisper-cpp -f file.wav) | HTTP sidecar (whisper-server) |
+|--------|------------------------------------------|-------------------------------|
+| Per-request overhead | Fork + model load every call | Model loaded once at startup |
+| Audio format | Only 16kHz mono WAV natively | Accepts any format with --convert |
+| JSON output to stdout | NOT supported (open issue #2571, Nov 2024) | Native JSON response body |
+| Temp file cleanup | Manual, error-prone | Server handles internally |
+| Concurrent requests | Sequential (one proc at a time) | Serialized by mutex, safe |
+| Integration surface | Bun.spawn, stdout parsing, file I/O | fetch() — identical to upstream calls |
 
-      return new Response(
-        async function* () {
-          const stream = await providerClient.chat.completions.create({
-            ...params,
-            stream: true,
-          });
-          for await (const chunk of stream) {
-            const json = JSON.stringify(normalizeChunk(chunk));
-            yield `data: ${json}\n\n`;
-          }
-          yield "data: [DONE]\n\n";
-        },
-        {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Request-ID": requestId,
-          },
-        }
-      );
-    },
-  },
-});
+**Install (macOS):**
+```bash
+brew install whisper-cpp   # version 1.8.6 as of research date
+brew install ffmpeg        # required for --convert flag
 ```
 
-**Critical gotcha:** `server.timeout(req, 0)` must be called before returning the Response. Bun's default idle timeout is 10 seconds — a quiet LLM stream (e.g., waiting for the first token) will drop the connection silently without this call.
+**Start sidecar:**
+```bash
+whisper-server \
+  --model "${WHISPER_MODEL_PATH}" \
+  --host 127.0.0.1 \
+  --port "${WHISPER_PORT:-8080}" \
+  --inference-path "/v1/audio/transcriptions" \
+  --threads 4 \
+  --convert
+```
 
-**No-failover-after-first-chunk constraint:** Once the generator has yielded at least one `data:` line, do not attempt failover. The HTTP response headers and status 200 are already committed. Detect errors from the upstream SDK before yielding or catch them after the first yield and close the stream cleanly with an SSE-level error event.
+The `--inference-path "/v1/audio/transcriptions"` flag remaps the server endpoint
+to match the OpenAI spec exactly. The `--convert` flag invokes FFmpeg internally to
+normalize any incoming audio to 16kHz mono PCM before inference — no ffmpeg subprocess
+calls needed in application code.
 
-**ReadableStream alternative:** Also supported, but the async generator form is simpler for relay use. The `ReadableStream` form requires manual `cancel()` cleanup.
+**Confidence:** MEDIUM-HIGH — HTTP server functionality confirmed via official whisper.cpp
+DeepWiki documentation and Voice Mode readthedocs. The `--inference-path` flag confirmed
+in multiple independent sources.
 
 ---
 
-### groq-sdk — Version, Streaming, Error, Rate Limit Headers
+## Subprocess Integration Pattern
 
-**Current version:** 1.2.1 (latest on npm as of 2026-06-04). The `package.json` pins `^0.37.0` — this is significantly behind. Upgrade is recommended but requires verifying the streaming API surface hasn't changed (the for-await pattern is stable).
+Because the recommended approach is HTTP sidecar, the Bun server proxies to the local
+whisper-server using `fetch()` — the same pattern already used for Cerebras/Groq upstream
+calls. No `Bun.spawn` needed for the hot path.
 
-**Streaming API surface (verified, HIGH confidence):**
+**Proxy pattern (what the route handler does):**
 
 ```typescript
-import Groq from "groq-sdk";
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// routes/audio-transcriptions.ts
+export async function handleAudioTranscription(req: Request): Promise<Response> {
+  // 1. Parse multipart from downstream client (see FormData section below)
+  const formData = await req.formData();
+  const file = formData.get("file");       // Blob
+  const model = formData.get("model");     // logical alias — validated but not forwarded
+  const responseFormat = formData.get("response_format") ?? "json";
+  const language = formData.get("language");
 
-const stream = await groq.chat.completions.create({
-  model: "openai/gpt-oss-20b",
-  messages: [...],
-  stream: true,
-});
-// stream is AsyncIterable<ChatCompletionChunk>
-for await (const chunk of stream) {
-  const delta = chunk.choices[0]?.delta?.content ?? "";
+  // 2. Forward to local whisper-server — reconstruct FormData
+  const upstream = new FormData();
+  upstream.append("file", file as Blob, (file as File).name ?? "audio.wav");
+  if (language) upstream.append("language", language as string);
+  upstream.append("response_format", responseFormat as string);
+
+  const whisperResp = await fetch(
+    `http://127.0.0.1:${WHISPER_PORT}/v1/audio/transcriptions`,
+    { method: "POST", body: upstream }
+  );
+
+  // 3. Normalize response — return { text: "..." } shape
+  const body = await whisperResp.json();
+  return Response.json({ text: body.text }, { status: whisperResp.status });
 }
 ```
 
-**Error handling — rate limit:**
+**Sidecar lifecycle:** whisper-server must be running before the Bun process serves
+audio requests. The `/ready` endpoint should check whisper-server availability:
 
 ```typescript
-import Groq from "groq-sdk";
-
-try {
-  await groq.chat.completions.create({ ... });
-} catch (err) {
-  if (err instanceof Groq.RateLimitError) {
-    // err.status === 429
-    // err.headers contains rate limit headers
-    const retryAfterSeconds = Number(err.headers?.get("retry-after") ?? "60");
-    // Groq rate limit headers (always on responses, retry-after only on 429):
-    //   x-ratelimit-limit-requests       (RPD)
-    //   x-ratelimit-limit-tokens         (TPM)
-    //   x-ratelimit-remaining-requests
-    //   x-ratelimit-remaining-tokens
-    //   x-ratelimit-reset-requests       (time until RPD resets)
-    //   x-ratelimit-reset-tokens         (time until TPM resets)
-    //   retry-after                      (seconds, only on 429)
-  }
-}
+// In readiness check
+const whisperAlive = await fetch("http://127.0.0.1:8080/health")
+  .then(r => r.ok)
+  .catch(() => false);
 ```
 
-**Raw header access (non-error path):** Use `.withResponse()` to get both parsed data and the raw `Response` object if you need to read rate-limit headers from successful responses:
+**If subprocess spawning is ever needed (fallback/testing only):**
+
+`Bun.spawn` signature for reference:
 
 ```typescript
-const { data, response } = await groq.chat.completions
-  .create({ ... })
-  .withResponse();
-const remaining = response.headers.get("x-ratelimit-remaining-requests");
+const proc = Bun.spawn(["whisper-cpp", "-m", modelPath, "-f", inputWavPath], {
+  stdout: "pipe",
+  stderr: "pipe",
+});
+await proc.exited;
+const text = await proc.stdout.text();
 ```
 
-**Groq error types:** `Groq.RateLimitError` (429), `Groq.InternalServerError` (500–504), `Groq.APIConnectionError` (network/timeout). All are subclasses of `Groq.APIError`. The `status` property holds the HTTP status code.
+Note: `-oj` writes JSON to a file on disk, not stdout. The whisper.cpp CLI has an
+open feature request (issue #2571, November 2024, unresolved) for stdout JSON output.
+This confirms the CLI path requires temp-file I/O per request — another argument
+against it.
 
 ---
 
-### @cerebras/cerebras_cloud_sdk — Streaming, Error, Rate Limit Headers
+## Multipart/FormData Parsing in Bun
 
-**Current version:** 1.64.1 (latest on npm as of 2026-06-04). `package.json` pins `^1.59.0` — within range, no upgrade needed.
+Bun has native `Request.formData()` support — no third-party library needed.
 
-**Streaming API surface (verified, HIGH confidence):**
+**Working pattern:**
 
 ```typescript
-import Cerebras from "@cerebras/cerebras_cloud_sdk";
-const cerebras = new Cerebras({ apiKey: process.env.CEREBRAS_API_KEY });
+const formData = await req.formData();
+const file = formData.get("file");      // returns File (extends Blob) for file fields
+const model = formData.get("model");    // returns string for text fields
 
-const stream = await cerebras.chat.completions.create({
-  model: "gpt-oss-120b",   // native Cerebras alias
-  messages: [...],
-  stream: true,
-  stream_options: { include_usage: true }, // usage only in final chunk
-});
-// stream is AsyncIterable<ChatCompletion>
-for await (const chunk of stream) {
-  const delta = chunk.choices[0]?.delta?.content ?? "";
-  // time_info and reasoning fields appear on final chunk — strip these
+if (!(file instanceof Blob)) {
+  return Response.json({ error: "file field required" }, { status: 400 });
 }
+
+// Get bytes for further processing if needed
+const bytes = new Uint8Array(await file.arrayBuffer());
+const filename = file instanceof File ? file.name : "upload";
+
+// Or write directly to disk (for CLI approach)
+await Bun.write("/tmp/whisper-upload.wav", file);
 ```
 
-**Fields to strip from Cerebras responses (per PROJECT.md requirement):**
-- `choices[*].message.reasoning`
-- `choices[*].reasoning_logprobs`
-- `time_info`
+**Known Bun FormData limitations (verified via open issues):**
 
-**Rate limit headers — Cerebras (on EVERY response, not just 429):**
-```
-x-ratelimit-limit-requests-day
-x-ratelimit-limit-tokens-minute
-x-ratelimit-remaining-requests-day
-x-ratelimit-remaining-tokens-minute
-x-ratelimit-reset-requests-day       (seconds, decimal: e.g. "33011.382...")
-x-ratelimit-reset-tokens-minute
-```
+1. Binary file content truncates at first null byte (0x00) for files <= 8 bytes.
+   Audio files are always larger — this edge case does not apply.
+2. Intermittent parse failures under high concurrency have been reported (issue #19097).
+   For a personal proxy with low RPS this is unlikely to matter.
+3. Large file uploads (100MB+) are fine; Bun streams the body.
 
-**SDK auto-retry:** The Cerebras SDK automatically retries 429 responses up to 2 times with exponential backoff by default. **Disable this** with `maxRetries: 0` in the constructor — the proxy's own routing layer manages failover and cooldown, not the SDK:
+**OpenAI multipart field names to accept:**
 
-```typescript
-const cerebras = new Cerebras({
-  apiKey: process.env.CEREBRAS_API_KEY,
-  maxRetries: 0, // let the proxy handle retries/failover
-});
-```
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `file` | File blob | Yes | Audio file |
+| `model` | string | Yes | Validate as known alias; do not forward raw |
+| `language` | string | No | BCP-47 code e.g. "en" |
+| `response_format` | string | No | "json" or "text"; "verbose_json"/"srt"/"vtt" if whisper-server supports |
+| `temperature` | string | No | Parse as float; forward if whisper-server accepts |
+| `prompt` | string | No | Context hint; forward if whisper-server accepts |
+| `timestamp_granularities[]` | string | No | Defer to post-MVP |
 
-**Same pattern applies for groq-sdk** — disable SDK-level retries so the proxy router has full control.
-
-**Error type:** `Cerebras.RateLimitError` for 429. Catch and read headers from `err.headers` or from the response object (since Cerebras sends rate-limit headers on all responses, you can read them from successful calls too).
+Reject unknown fields with a 400 to match the existing proxy's strict validation
+posture (same pattern as `request-schema.ts` for chat completions).
 
 ---
 
-### Zod — Request Body Validation
+## Audio Format Handling
 
-**Current version:** 4.4.3 (stable). Zod v4 is a ground-up rewrite with breaking changes from v3.
+**whisper.cpp native requirement:** 16kHz mono 16-bit PCM WAV only.
 
-**Why Zod v4, not v3:**
-- 14x faster string parsing, 7x faster array parsing — relevant for a hot request path
-- 57% smaller core bundle (ESM, tree-shakable)
-- TypeScript compile time: ~175 type instantiations vs >25,000 in v3
-- v3 is still installable via `zod/v3` import path for gradual migration — no conflict
+**whisper-server with `--convert`:** Delegates to FFmpeg automatically. This means
+any format FFmpeg understands is accepted — which covers the full OpenAI-supported set.
 
-**Breaking changes that affect this project:**
-- String format validators moved to top-level: `z.email()` not `z.string().email()` — does not affect request body validation for chat completions (we validate `model`, `messages`, `stream`, etc., not email strings)
-- Import: `import * as z from "zod"` or `import { z } from "zod"` — both work in v4
-- `z.strictObject()` for allowlist-based validation (rejects unknown keys with error)
+### Format support matrix
 
-**Pattern for allowlist validation (intersection contract):**
+| Format | OpenAI accepts | whisper-server --convert | Raw whisper.cpp CLI |
+|--------|---------------|--------------------------|---------------------|
+| wav (16kHz mono) | Yes | Yes (passthrough) | Yes |
+| wav (44.1/48kHz stereo) | Yes | Yes (resampled) | No — must convert |
+| mp3 | Yes | Yes | No |
+| mp4 | Yes | Yes | No |
+| mpeg / mpga | Yes | Yes | No |
+| m4a | Yes | Yes | No |
+| ogg | Yes | Yes | No |
+| webm | Yes | Yes | No |
+| flac | Yes | Yes | No |
+
+**Conclusion:** With `--convert`, application code needs zero ffmpeg invocations.
+FFmpeg is a system dependency (`brew install ffmpeg`) but not a runtime npm/Bun package.
+
+**Size limit:** Enforce OpenAI's 25MB limit at the Bun layer before forwarding:
 
 ```typescript
-import { z } from "zod";
-
-const ChatCompletionRequestSchema = z.strictObject({
-  model: z.string(),
-  messages: z.array(
-    z.strictObject({
-      role: z.enum(["system", "user", "assistant"]),
-      content: z.string(),
-    })
-  ).min(1),
-  stream: z.boolean().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().int().positive().optional(),
-  top_p: z.number().min(0).max(1).optional(),
-  stop: z.union([z.string(), z.array(z.string())]).optional(),
-  seed: z.number().int().optional(),
-});
-
-// In request handler:
-const body = await req.json();
-const result = ChatCompletionRequestSchema.safeParse(body);
-if (!result.success) {
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+if ((file as Blob).size > MAX_AUDIO_BYTES) {
   return Response.json(
-    { error: { message: result.error.message, type: "invalid_request_error" } },
-    { status: 400 }
+    { error: { message: "File too large. Max 25 MB.", type: "invalid_request_error" } },
+    { status: 413 }
   );
 }
-// result.data is fully typed
-```
-
-**`z.strictObject()` is the right tool** — it throws on unknown keys, implementing the allowlist contract without manual field enumeration. Fields like `logprobs`, `logit_bias`, `n` are rejected automatically if not in the schema.
-
----
-
-### Stateful In-Memory Provider State
-
-**No external dependency needed.** A module-level singleton is the correct pattern for single-process, no-persistence state in Bun:
-
-```typescript
-// state/providers.ts
-export type ProviderState = {
-  name: "cerebras" | "groq";
-  enabled: boolean;
-  cooldownUntil: number | null; // Date.now() ms, null = available
-};
-
-const state: ProviderState[] = [
-  { name: "cerebras", enabled: true, cooldownUntil: null },
-  { name: "groq", enabled: true, cooldownUntil: null },
-];
-
-let roundRobinIndex = 0;
-
-export function getEligibleProvider(): ProviderState | null {
-  const now = Date.now();
-  const eligible = state.filter(
-    (p) => p.enabled && (p.cooldownUntil === null || p.cooldownUntil <= now)
-  );
-  if (eligible.length === 0) return null;
-  const chosen = eligible[roundRobinIndex % eligible.length];
-  roundRobinIndex++;
-  return chosen;
-}
-
-export function setCooldown(name: string, seconds: number): void {
-  const p = state.find((p) => p.name === name);
-  if (p) p.cooldownUntil = Date.now() + seconds * 1000;
-}
-```
-
-**Why this approach:**
-- Bun runs single-threaded; no mutex or atomic operations needed
-- Module-level state persists across requests within a process (correct behavior)
-- No Redis, no file, no shared memory — matches the single-instance constraint
-- Cooldown expiry is lazy (checked at selection time, not via a timer) — simple and correct
-- Export functions not raw state — tests can import and manipulate state directly
-
----
-
-### Bun Test — HTTP Server Integration Pattern
-
-**Pattern: real server on port 0, `beforeAll`/`afterAll`:**
-
-```typescript
-// tests/chat.test.ts
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { createServer } from "../server"; // returns Server from Bun.serve()
-
-let server: ReturnType<typeof Bun.serve>;
-let baseUrl: string;
-
-beforeAll(() => {
-  server = createServer({ port: 0 }); // port 0 = OS assigns free port
-  baseUrl = `http://localhost:${server.port}`;
-});
-
-afterAll(() => {
-  server.stop(true); // true = force close active connections
-});
-
-test("POST /v1/chat/completions returns 401 without auth", async () => {
-  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "gpt-oss-120b-balanced", messages: [] }),
-  });
-  expect(res.status).toBe(401);
-});
-```
-
-**Mocking provider SDKs for unit tests** — use `mock.module()` to replace the SDK before import:
-
-```typescript
-import { mock } from "bun:test";
-
-mock.module("groq-sdk", () => ({
-  default: class MockGroq {
-    chat = {
-      completions: {
-        create: mock(async () => ({ choices: [{ message: { content: "ok" } }] })),
-      },
-    };
-  },
-}));
-```
-
-**Key insight:** Because Bun runs TypeScript natively with zero compile step, `beforeAll(() => Bun.serve(...))` is safe — no dist/ artifacts needed. Export the server factory from a module (`server.ts`) rather than calling `Bun.serve()` at module load time, so tests can construct a fresh instance.
-
----
-
-### UUID / Request ID Generation
-
-`crypto.randomUUID()` is a Web API available natively in Bun — no `uuid` package needed.
-
-```typescript
-const requestId = crypto.randomUUID(); // returns "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
 ```
 
 ---
 
-### Structured Logging
+## Model Management
 
-No library needed for MVP. Use `JSON.stringify` to console.log structured objects. Bun writes stdout synchronously. If a logging library is desired later, `pino` is the standard choice (extremely fast, structured, Bun-compatible) — but it adds a dependency and is not required given the single-user, personal-use scope.
+### Where to store model files
+
+```
+${WHISPER_MODEL_DIR}/              # env var; default: ./whisper-models/
+  ggml-large-v3-turbo.bin          # recommended default (~1.5 GB)
+  ggml-base.en.bin                 # fast English-only option (~141 MB)
+  ggml-small.en.bin                # balanced option (~466 MB)
+```
+
+Models are NOT downloaded automatically. One-time setup:
+
+```bash
+mkdir -p ./whisper-models
+curl -L \
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" \
+  -o ./whisper-models/ggml-large-v3-turbo.bin
+```
+
+Homebrew installs do not bundle models — they must be downloaded separately from
+https://huggingface.co/ggerganov/whisper.cpp/tree/main
+
+### Environment variable pattern (matches existing config.ts style)
+
+```bash
+# Required for audio transcription feature
+WHISPER_MODEL_PATH=./whisper-models/ggml-large-v3-turbo.bin
+
+# Optional
+WHISPER_PORT=8080
+WHISPER_HOST=127.0.0.1
+WHISPER_THREADS=4
+```
+
+### Model size recommendations
+
+| Model | Size | Speed (Apple M1) | WER | Use Case |
+|-------|------|-----------------|-----|----------|
+| tiny | 75 MB | Fastest | Highest error | Testing only |
+| base.en | 141 MB | Very fast | High error | English dev testing |
+| small | 466 MB | Fast | Moderate | Quick personal use |
+| large-v3-turbo | 1.5 GB | 129.5x real-time | 13.40% | **Recommended default** |
+| large-v3 | 3.1 GB | 55.3x real-time | 13.20% | Translation tasks only |
+
+**Recommendation: large-v3-turbo.** Benchmarked at 129.5x real-time on M-series hardware.
+Fits in 1.5 GB VRAM. Less than 0.2% WER difference from large-v3 for transcription.
+large-v3 is only needed if translation (not just transcription) is required — out of MVP scope.
+
+### Cross-platform note (Apple Silicon vs Linux/Docker)
+
+For Metal GPU acceleration on Apple Silicon, set before starting whisper-server:
+
+```bash
+export GGML_METAL_PATH_RESOURCES="$(brew --prefix whisper-cpp)/share/whisper-cpp"
+```
+
+For Linux or Docker, build from source:
+
+```bash
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp && make
+```
+
+Or use the official Docker image `ggerganov/whisper.cpp`. The sidecar HTTP pattern
+works identically on both platforms — only the startup command differs.
 
 ---
 
-## What NOT to Use
+## What NOT to Add
 
-| What | Why Not |
-|------|---------|
-| `express` / `hono` / `fastify` | `Bun.serve()` covers all requirements; extra dependency adds surface area, diverges from CLAUDE.md constraint |
-| `openai` npm package as proxy shim | The proxy IS the OpenAI-compatible layer; using the OpenAI SDK to proxy to itself creates circular confusion and unnecessary dep |
-| `dotenv` | Bun auto-loads `.env` and `.env.local`; importing dotenv is a no-op and a lint warning |
-| `ws` package | `WebSocket` is built-in to Bun; `ws` is Node.js-only ergonomics |
-| `better-sqlite3` | `bun:sqlite` is built-in; better-sqlite3 is Node.js-native-module incompatible with Bun |
-| `ioredis` | `Bun.redis` is built-in; also, the project explicitly has no Redis/persistence requirement |
-| `uuid` package | `crypto.randomUUID()` is a Web API standard, available in Bun globally |
-| `pino` / `winston` | Overkill for personal-use, single-instance proxy; structured `console.log(JSON.stringify(...))` is sufficient |
-| `jest` / `vitest` | `bun test` is the runtime; Jest/Vitest require Node.js and are explicitly excluded by CLAUDE.md |
-| `zod` v3 | v4 is stable at 4.4.3, significantly faster, smaller bundle, better TS compile performance; no reason to pin v3 for a greenfield project |
-| `cerebras` package (^1.2.7) | This is a native CLI binary (platform-specific), not an SDK. It installs `cerebras-darwin-arm64` etc. The existing `package.json` dependency should be removed — it is unused in application code and adds ~40MB of native binaries to the install |
-| SDK-level auto-retry (Cerebras default: 2 retries) | Disable with `maxRetries: 0` on both SDK clients. The proxy router owns retry/failover logic; SDK retries create timing conflicts with cooldown state and can delay failover to the alternate provider |
+### Do not add nodejs-whisper or whisper-node npm packages
+
+Both `nodejs-whisper` (v0.3.0) and `whisper-node` are thin wrappers that:
+- Shell out to the whisper.cpp CLI binary anyway (no performance gain vs direct CLI)
+- Require NAPI native build steps with uncertain Bun compatibility
+- Bun implements ~95% of Node-API but has known libuv incompatibilities
+- Add an abstraction layer that obscures error handling
+- Provide no benefit over direct `fetch()` to whisper-server
+
+### Do not add smart-whisper or whisper.cpp-wrapper
+
+Same reasons — NAPI addons, stale release cadence (whisper.cpp-wrapper last released
+>1 year ago), no verified Bun compatibility.
+
+### Do not add mlx-whisper (Python)
+
+mlx-whisper is fastest on Apple Silicon but:
+- Requires Python runtime as an additional system dependency
+- Subprocess with stdout/JSON-RPC parsing adds friction
+- Only works on macOS with Apple Silicon — no Linux/Docker path
+- whisper.cpp with Metal acceleration is nearly as fast with fewer moving parts
+
+### Do not add faster-whisper (Python/CTranslate2)
+
+- Also Python subprocess with same cross-language friction
+- Slower than mlx-whisper on Apple Silicon (~50% slower per benchmark)
+- No simpler than the HTTP sidecar approach
+
+### Do not add openai-whisper (original Python package)
+
+- Slowest Python implementation
+- Requires PyTorch, adding hundreds of MB of dependency overhead
+- whisper.cpp offers 2-5x faster inference on the same models
+
+### Do not add multer or busboy
+
+Bun's native `Request.formData()` handles multipart parsing. No middleware needed.
+
+### Do not expand to /v1/audio/speech (TTS)
+
+Out of MVP scope per CLAUDE.md. Neither Cerebras nor Groq exposes TTS in the
+unified contract.
 
 ---
 
-## Open Questions
+## Summary of New Dependencies
 
-1. **groq-sdk version gap:** Current pin is `^0.37.0`; latest is `1.2.1`. The major version bump (0.x → 1.x) likely has breaking changes. Before upgrading, verify the streaming `for await` API surface and `Groq.RateLimitError` class name are unchanged. Check the groq-typescript CHANGELOG.
+| Dependency | Type | Purpose |
+|------------|------|---------|
+| `brew install whisper-cpp` | System (Homebrew) | whisper-server binary + whisper-cpp CLI |
+| `brew install ffmpeg` | System (Homebrew) | Audio format conversion (used internally by whisper-server --convert) |
+| ggml model file (~1.5 GB) | Static asset | large-v3-turbo model weights downloaded from Hugging Face |
 
-2. **Cerebras `time_info` field shape:** The Cerebras SDK docs confirm `time_info` appears on the final streaming chunk. Verify the exact field path (`chunk.time_info` vs `chunk.usage.time_info`) against a live response or the SDK's TypeScript type definitions before writing the strip logic.
-
-3. **Groq model alias format:** The PROJECT.md model registry maps `gpt-oss-120b-balanced` → `openai/gpt-oss-120b` for Groq. The groq-sdk example in Context7 uses `model: 'openai/gpt-oss-20b'` — confirming the `openai/` prefix format is current. Verify `openai/gpt-oss-120b` is a valid Groq model ID against `/openai/v1/models`.
-
-4. **Zod v4 `z.strictObject` on discriminated unions:** The `messages` array contains `role`-discriminated objects. Verify `z.strictObject` behaves as expected when nested inside `z.array()` for the allowlist behavior — specifically that extra fields on individual message objects are rejected.
-
-5. **`server.stop()` behavior in `bun test`:** Bun's `Server.stop(true)` forcibly closes active connections. Confirm this does not leave dangling async generators mid-stream in integration tests — may need a short `await` or drain pattern after `stop()`.
+**Zero new npm/bun packages.** The audio transcription route uses:
+- Native `Request.formData()` for upload parsing
+- Native `fetch()` to forward to whisper-server
+- Existing `config.ts` pattern for env vars
+- Existing Zod v4 for request schema validation
 
 ---
 
 ## Sources
 
-- Context7 `/groq/groq-typescript`: streaming API, error types, `.withResponse()`, rate limit headers — HIGH confidence
-- Context7 `/oven-sh/bun`: SSE patterns, `server.timeout(req, 0)`, `port: 0`, `mock.module()`, `beforeAll`/`afterAll` — HIGH confidence  
-- Context7 `/colinhacks/zod`: `z.strictObject()`, `safeParse`, v4 API changes — HIGH confidence
-- Context7 `/cerebras/cerebras-cloud-sdk-node`: streaming API, `stream_options.include_usage`, `maxRetries` — HIGH confidence
-- [Groq Rate Limits docs](https://console.groq.com/docs/rate-limits): exact header names, `retry-after` format — HIGH confidence
-- [Cerebras Rate Limits docs](https://inference-docs.cerebras.ai/support/rate-limits): header names, decimal seconds format — HIGH confidence
-- npm registry: version verification (`groq-sdk@1.2.1`, `@cerebras/cerebras_cloud_sdk@1.64.1`, `zod@4.4.3`) — HIGH confidence
+- [whisper.cpp GitHub](https://github.com/ggml-org/whisper.cpp)
+- [whisper-cpp Homebrew formula v1.8.6](https://formulae.brew.sh/formula/whisper-cpp)
+- [whisper.cpp HTTP Server — DeepWiki](https://deepwiki.com/ggml-org/whisper.cpp/3.2-http-server)
+- [Voice Mode whisper.cpp setup docs](https://voice-mode.readthedocs.io/en/stable/whisper.cpp/)
+- [whisper.cpp audio format support discussion #1399](https://github.com/ggml-org/whisper.cpp/discussions/1399)
+- [whisper.cpp stdout JSON feature request #2571](https://github.com/ggml-org/whisper.cpp/issues/2571)
+- [Bun file uploads guide](https://bun.com/docs/guides/http/file-uploads)
+- [Bun.spawn documentation](https://bun.com/docs/runtime/child-process)
+- [Bun Node-API compatibility](https://bun.com/docs/runtime/node-api)
+- [Bun FormData concurrency issue #19097](https://github.com/oven-sh/bun/issues/19097)
+- [Bun FormData null byte issue #26740](https://github.com/oven-sh/bun/issues/26740)
+- [Whisper large-v3-turbo benchmark](https://whispernotes.app/blog/introducing-whisper-large-v3-turbo)
+- [MLX vs faster-whisper Apple Silicon comparison](https://medium.com/@GenerationAI/streaming-with-whisper-in-mlx-vs-faster-whisper-vs-insanely-fast-whisper-37cebcfc4d27)
+- [Apple Silicon Whisper speed benchmark](https://github.com/anvanvan/mac-whisper-speedtest)
+- [OpenAI audio transcriptions API reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)

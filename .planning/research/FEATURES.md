@@ -1,514 +1,622 @@
-# Features Research: OpenAI-Compatible Proxy
+# Features Research: Audio Transcription API
 
-**Domain:** OpenAI-compatible HTTP proxy middleware (Bun, Cerebras + Groq backends)
-**Researched:** 2026-06-04
-**Overall confidence:** HIGH — sourced from openai-node and openai-python official source code, Groq and Cerebras official docs
+**Domain:** POST /v1/audio/transcriptions — OpenAI-compatible proxy endpoint backed by Groq (Whisper)
+**Researched:** 2026-06-06
+**Overall confidence:** HIGH — sourced from OpenAI API reference (developers.openai.com), Groq speech-to-text docs (console.groq.com), openai-node and openai-python official source code
 
 ---
 
-## Table Stakes
+## Executive Context
 
-Features that break clients if missing. Verified against openai-node SDK source (`error.ts`, `completions.ts`) and openai-python SDK source (`_base_client.py`, `chat_completion.py`, `chat_completion_chunk.py`).
+This milestone adds `POST /v1/audio/transcriptions` to an existing Bun proxy that already handles
+`POST /v1/chat/completions`. The proxy currently routes between Cerebras and Groq. For audio
+transcription, **only Groq provides a Whisper-compatible endpoint**. Cerebras has no audio
+transcription API. This is a single-provider feature, not a round-robin feature.
 
-### 1. POST /v1/chat/completions — Non-Streaming Response Contract
+Groq's transcription endpoint (`https://api.groq.com/openai/v1/audio/transcriptions`) is
+OpenAI-compatible at the wire level. The existing auth middleware, structured logging, and error
+response shape all reuse without modification.
 
-**Why required:** Every OpenAI-compatible client (openai-node, openai-python, litellm, LangChain) parses this exact shape. Missing or mis-typed fields cause runtime errors.
+---
 
-**Exact required response shape:**
+## Table Stakes (must implement)
 
+These are required for any OpenAI SDK client (`openai-node`, `openai-python`) to call the
+endpoint without code changes.
+
+### AUDIO-01 — Multipart Form Data Parsing
+
+**Why required:** OpenAI clients encode all transcription parameters as `multipart/form-data`,
+not JSON. The audio file is a binary blob in a named form field called `file`. Bun's
+`Request.formData()` parses this natively — no library needed.
+
+**What the client sends:**
+```
+Content-Type: multipart/form-data; boundary=----FormBoundaryXYZ
+
+------FormBoundaryXYZ
+Content-Disposition: form-data; name="file"; filename="audio.mp3"
+Content-Type: audio/mpeg
+
+<binary audio bytes>
+------FormBoundaryXYZ
+Content-Disposition: form-data; name="model"
+
+whisper-large-v3-turbo
+------FormBoundaryXYZ--
+```
+
+**Bun implementation:** `const form = await request.formData(); const file = form.get("file");`
+The `file` field comes back as a `File` (subclass of `Blob`). All other fields are strings.
+
+**Complexity:** Low — Bun native; no multer or busboy needed
+
+---
+
+### AUDIO-02 — Request Field Validation (Allowlist)
+
+**Why required:** Unknown or unsupported fields must be rejected with `400` before reaching
+Groq. This maintains the same contract as the existing chat completions allowlist.
+
+**Full field table for `POST /v1/audio/transcriptions`:**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `file` | File (multipart) | Yes | — | Binary audio blob; max 25 MB per OpenAI, 25 MB free-tier / 100 MB dev-tier on Groq |
+| `model` | string | Yes | — | Logical proxy alias (see AUDIO-03) |
+| `language` | string | No | — | ISO-639-1 code (e.g. `"en"`). Improves accuracy and latency when set |
+| `prompt` | string | No | — | Up to 224 tokens. Guides transcription style or continues a prior segment |
+| `response_format` | string | No | `"json"` | One of: `json`, `text`, `verbose_json`. Groq does NOT support `srt` or `vtt` |
+| `temperature` | number | No | `0` | 0–1 range. Higher = more random. Groq maps `0` to internal epsilon |
+| `timestamp_granularities` | string[] | No | `["segment"]` | `"word"` and/or `"segment"`. Only valid when `response_format` is `"verbose_json"` |
+
+**Fields to reject with `400`:**
+- Any field not in the table above
+- `response_format` values `srt` or `vtt` (OpenAI supports these with whisper-1; Groq does not)
+- `timestamp_granularities` when `response_format` is not `"verbose_json"`
+- File MIME types not in the supported set
+
+**Complexity:** Low-Medium — Zod schema on FormData fields; mirror existing chat validation pattern
+
+---
+
+### AUDIO-03 — Model Alias Resolution for Transcription
+
+**Why required:** Downstream clients must not need to know Groq's internal model IDs
+(`whisper-large-v3`, `whisper-large-v3-turbo`). A logical alias in the model registry
+maintains the same drop-in contract as chat completions.
+
+**Recommended initial aliases:**
+
+| Logical Proxy Alias | Groq Upstream Model | Notes |
+|---|---|---|
+| `whisper-large-v3-turbo` | `whisper-large-v3-turbo` | Fastest, lowest cost ($0.04/hr). Recommended default |
+| `whisper-large-v3` | `whisper-large-v3` | Highest accuracy ($0.111/hr). Use when precision matters |
+
+Clients may pass either alias. The proxy resolves to the Groq model ID before forwarding.
+Return `400` for unknown aliases (same behaviour as chat completions).
+
+**Complexity:** Low — extend the existing model registry with an `audio` capability flag
+
+---
+
+### AUDIO-04 — Forward to Groq and Return Raw Response
+
+**Why required:** The proxy must forward the validated multipart form, receive the transcription
+response, and relay it to the downstream client.
+
+**Important:** Do NOT use the groq-sdk client here. The groq-sdk's audio module returns a parsed
+JavaScript object. For `text`, `srt`, and `vtt` response formats (non-JSON), the raw HTTP body
+must be relayed as a string. For `verbose_json` the parsed object is acceptable, but consistency
+favors a single path: forward the raw HTTP body from Groq and set the correct `Content-Type`.
+
+**Why forward raw:** Groq returns `verbose_json` with a specific field shape including `task`,
+`language`, `duration`, `words`, `segments`. Re-serializing an SDK-parsed object risks dropping
+fields or changing float precision. Forward the Groq body bytes directly.
+
+**Content-Type relay:**
+| `response_format` | Content-Type to return to client |
+|---|---|
+| `json` (default) | `application/json` |
+| `verbose_json` | `application/json` |
+| `text` | `text/plain` |
+
+**Complexity:** Medium — multipart rebuild and raw HTTP fetch to Groq (not SDK call)
+
+---
+
+### AUDIO-05 — Supported Audio Format Validation
+
+**Why required:** Passing an unsupported format to Groq causes a 400 from Groq that the proxy
+must then handle. Validate early and return a clear error.
+
+**Supported formats (intersection of OpenAI spec and Groq):**
+
+| Format | MIME Types |
+|---|---|
+| mp3 | `audio/mpeg`, `audio/mp3` |
+| mp4 | `audio/mp4`, `video/mp4` |
+| mpeg | `audio/mpeg` |
+| mpga | `audio/mpeg` |
+| m4a | `audio/m4a`, `audio/x-m4a` |
+| wav | `audio/wav`, `audio/x-wav` |
+| webm | `audio/webm`, `video/webm` |
+| ogg | `audio/ogg` |
+| flac | `audio/flac`, `audio/x-flac` |
+
+**Note:** OpenAI's spec does not include `ogg` or `flac` in its published list but Groq accepts
+them. For the proxy contract, expose the OpenAI-documented set only (`mp3, mp4, mpeg, mpga, m4a,
+wav, webm`) and reject `ogg`/`flac` to stay within the guaranteed intersection.
+
+Validate by file extension from the filename field AND MIME type when available. Return `400`
+with `"Unsupported audio format"` if neither matches.
+
+**Complexity:** Low — MIME/extension check before forwarding
+
+---
+
+### AUDIO-06 — File Size Limit Enforcement
+
+**Why required:** Both OpenAI and Groq free-tier cap at 25 MB. Sending oversized files to Groq
+causes a Groq-side 413. Validate early to return a clean error.
+
+**Limit:** 25 MB (26,214,400 bytes)
+
+**Implementation:** Check `file.size` on the parsed `File` blob before building the upstream
+request. Return `413` with OpenAI error shape:
 ```json
 {
-  "id": "chatcmpl-<string>",
-  "object": "chat.completion",
-  "created": 1769729480,
-  "model": "<logical-alias>",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "<string or null>"
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 20,
-    "total_tokens": 30
+  "error": {
+    "message": "Audio file too large. Maximum size is 25 MB.",
+    "type": "invalid_request_error",
+    "code": "file_too_large",
+    "param": "file"
   }
 }
 ```
 
-**Field-level rules:**
-- `id` — must be a non-empty string; openai-node stores it directly
-- `object` — must be exactly the string `"chat.completion"`; SDK and litellm branch on this literal
-- `created` — Unix timestamp integer in seconds; openai-python stores it for metadata
-- `model` — must be the logical proxy alias, not the upstream provider model ID; clients use this to identify which model responded
-- `choices[0].index` — must be `0` for single-choice responses; openai-node indexes into this
-- `choices[0].message.role` — must be `"assistant"` for all normal completions
-- `choices[0].message.content` — string or `null`; clients check for null when tool_calls are present
-- `choices[0].finish_reason` — must be one of `"stop"`, `"length"`, `"tool_calls"`, `"content_filter"`, or `null` (null only during streaming mid-stream); clients gate behavior on this value
-- `usage` — technically optional in the OpenAI spec, but litellm, LangChain, and cost-tracking clients fail or warn loudly when it is absent; treat as required for proxy purposes
-
-**Complexity:** Low — normalization pass on upstream response
-
-**Dependencies:** Response normalization layer; model alias rewrite
+**Complexity:** Low — single size check
 
 ---
 
-### 2. POST /v1/chat/completions — Streaming (SSE) Response Contract
+### AUDIO-07 — Bearer Auth (reuse existing middleware)
 
-**Why required:** The openai-node `stream()` helper and openai-python `stream()` context manager iterate `ChatCompletionChunk` objects. Any structural deviation causes silent data loss or hard exceptions.
+**Why required:** The endpoint must enforce `Authorization: Bearer PERSONAL_PROXY_API_KEY` like
+all other protected routes. The existing auth middleware runs before routing and covers this
+automatically if the route is registered under the protected router.
 
-**Wire format per chunk:**
-
-```
-data: {"id":"chatcmpl-<string>","object":"chat.completion.chunk","created":1769729480,"model":"<logical-alias>","choices":[{"index":0,"delta":{"role":"assistant","content":"<token>"},"finish_reason":null}]}
-
-data: [DONE]
-```
-
-**Field-level rules:**
-- `object` — must be exactly `"chat.completion.chunk"` on every chunk; openai-python Pydantic model uses `Literal["chat.completion.chunk"]` for validation
-- `id` — must be the same string on every chunk; clients reconstruct the full ID from the first chunk
-- `created` — must be the same integer on every chunk
-- `model` — must be the logical proxy alias on every chunk; rewrite before relaying
-- `choices[0].delta` — object containing incremental fields; on the first chunk `delta.role` = `"assistant"`, subsequent chunks omit `role`; `delta.content` is the text fragment (can be `null` or empty string)
-- `choices[0].finish_reason` — `null` on all chunks except the last content chunk; on the final content chunk it must be `"stop"` (or `"length"` etc.)
-- `data: [DONE]` — required sentinel on its own line; both SDKs break iteration on this literal; not a JSON object; no trailing newlines after the final `\n\n`
-
-**HTTP headers required:**
-- `Content-Type: text/event-stream` — required; openai-node checks for SSE content-type when deciding how to parse the body
-- `Cache-Control: no-cache` — recommended; prevents proxies from buffering the stream
-- `Transfer-Encoding: chunked` or HTTP/1.1 with no `Content-Length` — required for incremental delivery
-
-**SSE formatting:**
-- Each event: `data: <json>\n\n` (two newlines to terminate the event)
-- No `event:` or `id:` prefix needed; data-only SSE
-- No buffering — forward each chunk as received from upstream SDK
-
-**Complexity:** Medium — SSE relay with per-chunk model field rewrite; no buffering
-
-**Dependencies:** Stream relay; model alias rewrite; upstream SDK streaming iterable
+**Complexity:** None — already implemented; register route correctly
 
 ---
 
-### 3. GET /v1/models — Response Contract
+### AUDIO-08 — OpenAI-Shaped Error Responses
 
-**Why required:** openai-node and openai-python both call this endpoint when constructing clients with `client.models.list()`. LiteLLM validates models at startup. More importantly, any client using model auto-discovery will 404 or fail silently on a missing endpoint.
+**Why required:** Same contract as chat completions. The openai-node SDK's error parsing logic
+(`response?.['error']?.message`) applies to audio transcription errors identically.
 
-**Exact required response shape:**
+**Complexity:** None — reuse existing error utility
+
+---
+
+## Differentiators (nice to have)
+
+These add value but do not block OpenAI SDK compatibility.
+
+### AUDIO-D1 — verbose_json Model Field Normalization
+
+**Value:** When Groq returns `verbose_json`, it does not include a top-level `model` field. If
+the proxy adds `"model": "<logical-alias>"` to the response body before relaying, clients that
+read this field (LiteLLM, custom instrumentation) get consistent model tracking.
+
+**Complexity:** Low — JSON parse, inject field, re-serialize
+
+---
+
+### AUDIO-D2 — Structured Logging for Transcription Requests
+
+**Value:** Log request ID, logical model alias, Groq model ID, file size in bytes, audio MIME
+type, `response_format`, `language`, latency, Groq status code. Follows existing log schema.
+Omit filename and prompt contents (may contain PII).
+
+**Complexity:** Low — extend existing logger call pattern
+
+---
+
+### AUDIO-D3 — X-Request-ID Header on All Responses
+
+**Value:** Consistent with existing proxy behavior. Reuse existing request-ID middleware.
+
+**Complexity:** None — already implemented if route is registered through existing middleware chain
+
+---
+
+### AUDIO-D4 — Rate Limit Header Capture from Groq
+
+**Value:** Groq returns rate-limit headers for audio endpoints too. Capture and snapshot them
+into provider state for the `/internal/providers/status` endpoint. Groq audio rate limits are
+separate from chat completions rate limits.
+
+Groq audio rate-limit headers:
+```
+x-ratelimit-limit-requests
+x-ratelimit-remaining-requests
+x-ratelimit-reset-requests
+x-ratelimit-limit-audio-seconds
+x-ratelimit-remaining-audio-seconds
+x-ratelimit-reset-audio-seconds
+```
+
+**Complexity:** Low — extend Groq adapter to capture these headers from audio responses
+
+---
+
+### AUDIO-D5 — GET /v1/models Inclusion of Audio Models
+
+**Value:** Include `whisper-large-v3-turbo` and `whisper-large-v3` in the `/v1/models` response
+so clients that call `client.models.list()` can discover them. Mark `owned_by` as
+`"personal-proxy"` for consistency.
+
+**Complexity:** Low — extend model registry entries with audio aliases; update models route
+
+---
+
+## Anti-Features / Out of Scope
+
+### ANTI-01 — POST /v1/audio/translations
+
+**Why excluded:** The translations endpoint (`/v1/audio/translations`) translates non-English
+audio into English text. Groq supports it at `https://api.groq.com/openai/v1/audio/translations`.
+However:
+- It is only meaningful for non-English source audio
+- It only supports `whisper-large-v3` (not turbo)
+- The proxy CLAUDE.md explicitly excludes `/v1/audio/*` from MVP
+- Adding it doubles the implementation surface for marginal gain in a personal proxy
+- Clients that need translation can call Groq directly
+
+**Decision:** Exclude from this milestone. Return `404` with a clear error message if called.
+
+---
+
+### ANTI-02 — Streaming Transcription (stream: true)
+
+**Why excluded:** OpenAI added `stream: true` for `gpt-4o-transcribe` models in 2025. Groq does
+not currently expose a streaming audio transcription endpoint in its OpenAI-compatible API.
+Attempting to pass `stream: true` to Groq would fail or return a non-streaming response.
+
+**Decision:** Reject `stream: true` with `400`: `"Streaming is not supported for audio
+transcriptions on this proxy."` Do not silently ignore it.
+
+---
+
+### ANTI-03 — srt / vtt Response Formats
+
+**Why excluded:** OpenAI supports `srt` and `vtt` with `whisper-1`. Groq does not support these
+formats. Groq only supports `json`, `verbose_json`, and `text`.
+
+**Decision:** Reject with `400`: `"Response format 'srt' is not supported. Use json, verbose_json,
+or text."` Do not forward to Groq.
+
+---
+
+### ANTI-04 — Cerebras Audio Transcription
+
+**Why excluded:** Cerebras provides no audio transcription endpoint. Their API is LLM inference
+only. Implementing any audio routing to Cerebras is not possible.
+
+**Decision:** Audio transcription is Groq-only. The round-robin router does not apply here.
+The provider selection for audio is static: always Groq.
+
+---
+
+### ANTI-05 — diarized_json / Speaker Diarization
+
+**Why excluded:** Groq does not expose diarization. OpenAI's `diarized_json` format requires the
+`gpt-4o-transcribe-diarize` model which is an OpenAI-only model. Not implementable via Groq.
+
+---
+
+### ANTI-06 — include[] / logprobs
+
+**Why excluded:** OpenAI's `include: ["logprobs"]` parameter is only supported by
+`gpt-4o-transcribe` model on OpenAI's own infrastructure. Groq Whisper does not return logprobs.
+
+---
+
+### ANTI-07 — chunking_strategy / known_speaker_names
+
+**Why excluded:** These are `gpt-4o-transcribe-diarize` specific parameters on OpenAI. Groq
+does not support them.
+
+---
+
+### ANTI-08 — POST /v1/audio/speech (TTS)
+
+**Why excluded:** Text-to-speech is a separate capability. Neither Cerebras nor Groq are used
+for TTS in this project. Out of scope.
+
+---
+
+## OpenAI Request Contract
+
+Complete field reference for `POST /v1/audio/transcriptions` based on the OpenAI API reference
+and verified against Groq's implementation:
+
+| Field | Type | Required | Default | Groq Support | Notes |
+|---|---|---|---|---|---|
+| `file` | File (multipart) | Yes | — | Yes | Binary audio. Max 25 MB. Must be a valid audio format |
+| `model` | string | Yes | — | Yes | Logical alias resolves to `whisper-large-v3` or `whisper-large-v3-turbo` |
+| `language` | string | No | — | Yes | ISO-639-1 (e.g. `"en"`, `"es"`). Reduces latency and improves accuracy |
+| `prompt` | string | No | — | Yes | Up to 224 tokens. Can continue a prior audio segment's context |
+| `response_format` | string | No | `"json"` | Partial | `json` ✓, `verbose_json` ✓, `text` ✓, `srt` ✗, `vtt` ✗ |
+| `temperature` | number | No | `0` | Yes | 0–1. Groq maps `0` to internal epsilon. Do not advertise zero-temp reproducibility |
+| `timestamp_granularities` | string[] | No | `["segment"]` | Yes | `"word"` and/or `"segment"`. Requires `response_format: "verbose_json"` |
+| `stream` | boolean | No | `false` | No | OpenAI-only with gpt-4o models. Reject with 400 |
+| `include` | string[] | No | — | No | OpenAI-only (logprobs). Reject with 400 |
+| `chunking_strategy` | string/object | No | — | No | OpenAI-only (diarize). Reject with 400 |
+| `known_speaker_names` | string[] | No | — | No | OpenAI-only (diarize). Reject with 400 |
+| `known_speaker_references` | string[] | No | — | No | OpenAI-only (diarize). Reject with 400 |
+
+---
+
+## Response Format Examples
+
+### json (default)
+
+The simplest response. Returned when `response_format` is omitted or `"json"`.
+`Content-Type: application/json`
 
 ```json
 {
-  "object": "list",
-  "data": [
+  "text": "Imagine the wildest idea that you've ever had, and you're curious about how it might scale."
+}
+```
+
+Note: OpenAI's newer gpt-4o-transcribe models also return `usage` in the json response.
+Groq's Whisper-based response returns only `text` at the top level. Do not inject a fake
+`usage` field — clients that check `typeof response.text === "string"` will work correctly.
+
+---
+
+### verbose_json
+
+Returns rich metadata including segment-level and optionally word-level timestamps.
+Only available with `response_format: "verbose_json"`.
+`Content-Type: application/json`
+
+```json
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 8.470000267028809,
+  "text": "The beach was a popular spot on a hot summer day. People were swimming in the ocean, building sandcastles, and playing beach volleyball.",
+  "segments": [
     {
-      "id": "gpt-oss-120b-balanced",
-      "object": "model",
-      "created": 0,
-      "owned_by": "personal-proxy"
+      "id": 0,
+      "seek": 0,
+      "start": 0.0,
+      "end": 4.5,
+      "text": " The beach was a popular spot on a hot summer day.",
+      "tokens": [50364, 440, 7534, 390, 257, 3743, 4004, 322, 257, 2368, 4391, 786, 13],
+      "temperature": 0.0,
+      "avg_logprob": -0.2860786020755768,
+      "compression_ratio": 1.2363636493682861,
+      "no_speech_prob": 0.00985979475080967
+    }
+  ],
+  "words": [
+    {
+      "word": "The",
+      "start": 0.0,
+      "end": 0.23999999463558197
+    },
+    {
+      "word": "beach",
+      "start": 0.23999999463558197,
+      "end": 0.5
     }
   ]
 }
 ```
 
-**Field-level rules:**
-- `object` — must be `"list"` at the top level
-- `data[]` — array; can be empty but must exist
-- `data[].id` — must be the logical alias string
-- `data[].object` — must be `"model"` per-item
-- `data[].created` — integer; acceptable to return `0` for synthetic aliases
-- `data[].owned_by` — string; any non-empty value is fine; `"personal-proxy"` or `"proxy"` is conventional
+**verbose_json field schema:**
 
-**Complexity:** Low — static response from model registry
+| Field | Type | Always Present | Description |
+|---|---|---|---|
+| `task` | string | Yes | Always `"transcribe"` |
+| `language` | string | Yes | Full language name (e.g. `"english"`, not `"en"`) |
+| `duration` | number | Yes | Audio duration in seconds (float) |
+| `text` | string | Yes | Complete transcription |
+| `segments` | array | Yes | Array of segment objects |
+| `segments[].id` | integer | Yes | Sequential segment index starting at 0 |
+| `segments[].seek` | integer | Yes | Audio frame offset (internal Whisper seek position) |
+| `segments[].start` | number | Yes | Segment start time in seconds |
+| `segments[].end` | number | Yes | Segment end time in seconds |
+| `segments[].text` | string | Yes | Segment text (may have leading space) |
+| `segments[].tokens` | integer[] | Yes | Whisper token IDs |
+| `segments[].temperature` | number | Yes | Sampling temperature used for this segment |
+| `segments[].avg_logprob` | number | Yes | Average log probability. Values below -1 indicate unreliable output |
+| `segments[].compression_ratio` | number | Yes | Compression ratio. Values above 2.4 indicate likely hallucination |
+| `segments[].no_speech_prob` | number | Yes | Probability the segment contains no speech (0–1) |
+| `words` | array | Only with `timestamp_granularities: ["word"]` | Array of word objects |
+| `words[].word` | string | — | The word (may have leading/trailing space) |
+| `words[].start` | number | — | Word start time in seconds |
+| `words[].end` | number | — | Word end time in seconds |
 
-**Dependencies:** Model registry
+**Interpretation guidance for clients:**
+- `avg_logprob < -1`: transcription confidence is low for this segment
+- `no_speech_prob > 1.0 AND avg_logprob < -1`: segment is likely silence, discard
+- `compression_ratio > 2.4`: segment may be hallucinated repeated text
 
 ---
 
-### 4. OpenAI-Shaped Error Responses
+### text
 
-**Why required:** The openai-node SDK (`core/error.ts`) specifically unwraps `response.error.message`, `response.error.type`, `response.error.code`, and `response.error.param` from the response body. The openai-python SDK (`_base_client.py`) attempts to parse the body as JSON and wraps it in a typed exception. Non-conforming error bodies cause clients to show generic or misleading error messages; worse, typed error subclasses (`AuthenticationError`, `RateLimitError`, etc.) are only instantiated when the SDK recognises the shape.
+Plain string response. No JSON wrapping.
+`Content-Type: text/plain`
 
-**Required error shape:**
-
-```json
-{
-  "error": {
-    "message": "Human-readable description of what went wrong",
-    "type": "invalid_request_error",
-    "code": null,
-    "param": null
-  }
-}
+```
+The beach was a popular spot on a hot summer day. People were swimming in the ocean, building sandcastles, and playing beach volleyball.
 ```
 
-**Status-to-type mapping** (follow OpenAI conventions so SDK subclasses map correctly):
-
-| HTTP Status | `type` value | SDK exception class |
-|-------------|--------------|---------------------|
-| 400 | `"invalid_request_error"` | `BadRequestError` |
-| 401 | `"authentication_error"` | `AuthenticationError` |
-| 403 | `"permission_denied_error"` | `PermissionDeniedError` |
-| 404 | `"not_found_error"` | `NotFoundError` |
-| 422 | `"invalid_request_error"` | `UnprocessableEntityError` |
-| 429 | `"rate_limit_error"` | `RateLimitError` |
-| 500+ | `"api_error"` | `InternalServerError` |
-
-**Field-level rules:**
-- Response must be `Content-Type: application/json`
-- Top-level key must be `"error"` — the Node SDK does `response?.['error']` unwrap
-- `message` — required string; becomes the exception message in both SDKs
-- `type` — required string; used by Node SDK for display; openai-python uses HTTP status for class selection
-- `code` — `null` is acceptable; present when the error has a machine-readable code
-- `param` — `null` is acceptable; present when the error references a specific request parameter
-
-**Complexity:** Low — standardised error utility function
-
-**Dependencies:** Auth middleware, request validation, routing errors
-
 ---
 
-### 5. Bearer Authentication — 401 on Invalid/Missing Credentials
+## Client Library Behavior
 
-**Why required:** openai-node and openai-python both send `Authorization: Bearer <key>` and expect a `401` on failure, which maps to `AuthenticationError` in both SDKs. Clients that have retry logic (e.g., litellm fallback chains) will wrongly retry 401s if they receive a non-standard status code.
+### openai-node (TypeScript)
 
-**Exact behavior:**
-- Missing `Authorization` header → `401` with `{"error": {"message": "Missing API key", "type": "authentication_error", ...}}`
-- Invalid key → `401` with same shape
-- Never reveal whether the key was close, expired, or simply wrong
-- Use constant-time comparison to prevent timing-based key enumeration
-
-**Complexity:** Low — middleware that runs before all protected routes
-
-**Dependencies:** Error response utility
-
----
-
-### 6. Request Field Allowlist — Reject Unsupported Fields with 400
-
-**Why required:** The proxy contract is the intersection of Cerebras and Groq capabilities. Forwarding unsupported fields to either provider causes that provider to return 400, which the proxy would have to handle anyway. Reject early for deterministic client feedback.
-
-**Fields that must cause 400 if present (Groq explicitly rejects these):**
-- `logprobs`
-- `logit_bias`
-- `top_logprobs`
-- `messages[].name`
-- `n` with a value other than `1`
-
-**Fields to silently strip before forwarding (provider-specific extras the proxy adds or normalises):**
-- None in MVP — strict allowlist means unrecognised fields return 400, not silent strip
-
-**MVP allowlisted passthrough fields:**
-- `model` (required)
-- `messages` (required)
-- `temperature`
-- `top_p`
-- `max_completion_tokens`
-- `stream`
-- `stop`
-- `seed`
-- `stream_options` (pass through; both providers support `include_usage`)
-
-**Complexity:** Low-Medium — schema validation at route entry; Zod or manual check
-
-**Dependencies:** Schema definitions; error response utility
-
----
-
-### 7. Model Alias Resolution — 400 on Unknown Alias
-
-**Why required:** Upstream providers will return 404 or a confusing model-not-found error for unknown model IDs. The proxy must own the validation and return an intelligible 400 before the upstream call is made. openai-node clients surface `BadRequestError` for 400s, which is the correct semantics.
-
-**Behavior:**
-- Lookup `request.model` in the registry
-- If not found: `400 {"error": {"message": "Unknown model: <alias>", "type": "invalid_request_error", "code": "model_not_found", "param": "model"}}`
-- If found but no eligible provider for that alias at this moment: return 503 with a provider-unavailable error shape
-
-**Complexity:** Low — registry lookup before provider selection
-
-**Dependencies:** Model registry; provider state
-
----
-
-### 8. X-Request-ID Response Header
-
-**Why required:** openai-node SDK automatically reads the `x-request-id` response header and exposes it as `response._request_id` on all response objects. openai-python does the same. Downstream clients (LangChain traces, litellm logging, custom instrumentation) log this for request correlation. Absence is non-fatal but breaks standard SDK observability patterns.
-
-**Behavior:**
-- Generate a UUID v4 per request at middleware entry
-- Return `X-Request-ID: <uuid>` on all responses including error responses
-- Log the same UUID in structured logs for correlation
-
-**Complexity:** Low — UUID generation in request-ID middleware
-
-**Dependencies:** Request-ID middleware runs before routing
-
----
-
-### 9. Response Normalization — Strip Provider-Specific Fields
-
-**Why required:** Cerebras and Groq both return fields not in the OpenAI spec. Forwarding these to clients causes schema validation failures in strictly-typed clients (openai-python Pydantic, litellm validators) and may leak implementation details.
-
-**Fields to remove before returning to client:**
-
-Cerebras:
-- `choices[*].message.reasoning` — chain-of-thought; must never be exposed
-- `choices[*].reasoning_logprobs`
-- `time_info` — Cerebras-specific telemetry object
-
-Groq:
-- `x_groq` — Groq request metadata object (contains Groq's internal request ID)
-- `usage_breakdown` — Groq compound-system token breakdown; not in OpenAI spec
-
-**Behavior for streaming:**
-- Strip the same fields from each chunk delta where applicable
-- Rewrite `model` field in every chunk to the logical alias
-
-**Complexity:** Low — object key deletion pass in normalizer
-
-**Dependencies:** Response normalizer; streaming relay
-
----
-
-## Differentiators
-
-Features that add value without breaking clients if absent.
-
-### 1. X-LLM-Provider Diagnostic Header (opt-in)
-
-**Value proposition:** Debugging aid for developers who want to know which backend served a request without looking at logs. Controlled by `EXPOSE_PROVIDER_HEADER=true` env var, default off.
-
-```http
-X-LLM-Provider: cerebras
+The `openai.audio.transcriptions.create()` method internally calls:
+```typescript
+this._client.post(
+  '/audio/transcriptions',
+  multipartFormRequestOptions({ body, ...options }, this._client)
+)
 ```
 
-Default off ensures no provider leakage in production. Turn on during development.
+The `multipartFormRequestOptions` utility:
+1. Sets `Content-Type: multipart/form-data` (browser adds boundary automatically via Fetch API)
+2. Extracts the `file` field (path `[["file"]]`) and converts it to a multipart part
+3. Sends all other fields as string parts
 
-**Complexity:** Low — conditional header in response normalizer
+**File input types accepted by openai-node:**
+- `fs.createReadStream("audio.mp3")` — Node.js ReadStream
+- A `File` object (Web API)
+- A `Blob` object
+- A `Response` from `fetch()`
 
----
+The client sets `filename` from the stream's `path` property or from a `File` object's `name`.
+If filename is missing, the library uses a default like `"upload"`. Groq requires a filename
+with a valid extension to infer MIME type — always include a filename.
 
-### 2. GET /ready — Degraded-Mode Readiness Check
-
-**Value proposition:** Health check that distinguishes "nothing configured" from "one provider temporarily down." Container orchestrators (EasyPanel, Kubernetes) can use this to avoid routing to an unconfigured instance while allowing a degraded-but-functional instance to continue serving.
-
-```json
-{
-  "ready": true,
-  "mode": "degraded",
-  "eligibleProviders": ["cerebras"],
-  "unavailableProviders": ["groq"]
-}
+**Response type overloads:**
+```typescript
+// response_format: "json" (default) → Transcription { text: string }
+// response_format: "verbose_json" → TranscriptionVerbose { task, language, duration, text, words, segments }
+// response_format: "text" | "srt" | "vtt" → string
 ```
 
-**Complexity:** Low — query provider state, check model registry
-
----
-
-### 3. GET /internal/providers/status — Protected Diagnostics
-
-**Value proposition:** Rate-limit snapshot, cooldown expiry, consecutive failure counts without requiring log access. Protected by the same `PERSONAL_PROXY_API_KEY`.
-
-**Complexity:** Low — serialize provider state to JSON
-
----
-
-### 4. Structured JSON Logging (per request)
-
-**Value proposition:** Debugging provider selection, failover, and quota events without adding external monitoring. Correlatable via `X-Request-ID`.
-
-**Log fields:** request ID, timestamp, logical model alias, chosen provider, upstream model ID, attempt number, streaming flag, status code, latency ms, failover reason, cooldown expiry, token usage, captured rate-limit headers.
-
-**Complexity:** Low-Medium — logger utility wrapping `console.log` with JSON serialisation; LOG_LEVEL env var for verbosity gating
-
----
-
-### 5. stream_options.include_usage Passthrough
-
-**Value proposition:** Clients that set `stream_options: {"include_usage": true}` will receive a final usage chunk before `[DONE]`. Both Groq and Cerebras appear to support this. Passing it through lets cost-tracking clients get token counts in streaming mode without making a separate non-streaming call.
-
-**Complexity:** Low — add `stream_options` to the allowlisted fields; relay as-is
-
----
-
-### 6. Provider Cooldown Recovery Logging
-
-**Value proposition:** Logs when a provider re-enters rotation after cooldown expiry. Useful for diagnosing quota patterns on free-tier accounts.
-
-**Complexity:** Low — add log emission in cooldown manager when `Date.now() > cooldownUntil`
-
----
-
-## Anti-Features
-
-Deliberately excluded from this proxy. Rationale included for future reference.
-
-### 1. Tool Calling / Function Calling
-
-**Why excluded:** Both providers support tools but with diverging edge cases (streaming tool calls, parallel tool calls, `tool_choice` semantics). The shared model (`gpt-oss-120b`) has not been tested across both providers for tool-calling compatibility. Enabling untested features violates the "intersection contract only" principle. A broken tool call mid-stream is harder to debug than a clean 400 at validation.
-
-**What to do instead:** Add to allowlist only after explicit cross-provider testing with the registered model alias.
-
----
-
-### 2. response_format (JSON mode / JSON schema)
-
-**Why excluded:** Same reason as tools — diverging provider behaviour for structured outputs under streaming and non-streaming paths. Cerebras has more complete JSON schema support; Groq has beta structured outputs. Needs explicit compatibility testing per model.
-
----
-
-### 3. logprobs / top_logprobs
-
-**Why excluded:** Groq explicitly rejects these fields with a 400. Passing them to Groq would always fail half the round-robin. Cerebras supports logprobs, but offering them from the proxy would require Groq-path fallback handling that contradicts the intersection contract.
-
----
-
-### 4. n > 1 (Multiple Completions per Request)
-
-**Why excluded:** Groq requires `n = 1`. Groq would return 400 for `n > 1`. The intersection contract means this cannot be offered.
-
----
-
-### 5. Legacy /v1/completions Endpoint
-
-**Why excluded:** No modern client uses the non-chat completions endpoint for LLM work. Adding it would be dead code that increases surface area without value.
-
----
-
-### 6. /v1/embeddings, /v1/audio/*, /v1/images/*
-
-**Why excluded:** Out of scope for inference routing. Neither Cerebras nor Groq are used here for embeddings or media. Adding stubs would create confusion about what the proxy actually does.
-
----
-
-### 7. Persistent Conversation Storage
-
-**Why excluded:** Clients own conversation state. The proxy is stateless by design. Adding storage would add a database dependency and change the operational profile of what is intentionally a thin routing layer.
-
----
-
-### 8. Frequency Penalty / Presence Penalty (for now)
-
-**Why deferred:** Cerebras accepts these fields. Groq compatibility is undocumented at the intersection level. Per refactor.md spec: "allow only after provider compatibility tests." Not an anti-feature permanently — re-evaluate after testing.
-
----
-
-### 9. reasoning_effort Passthrough
-
-**Why excluded:** This is a Cerebras-specific parameter (for `gpt-oss-120b`). Groq does not support it. Passing it through would fail on Groq. Strip if present in incoming requests; return 400 with a clear message.
-
----
-
-## Client Compatibility Notes
-
-### openai-node (TypeScript/JavaScript)
-
-**Error parsing (HIGH confidence — source verified):**
-- The SDK calls `(errorResponse as Record<string, any>)?.['error']` to unwrap the error object
-- Then reads `.message`, `.type`, `.code`, `.param` from the unwrapped object
-- If `error.message` is present and non-null, it becomes the exception message
-- If the body is not valid JSON or lacks an `error` key, the SDK falls back to a generic message with the HTTP status code
-- Implication: always return `{"error": {...}}` — a flat `{"message": "..."}` at root level will NOT be parsed correctly as an `AuthenticationError` or `RateLimitError`
-
-**Request ID (HIGH confidence — source verified):**
-- Reads `x-request-id` response header and exposes as `response._request_id`
-- Available on all response objects and error objects as `err.request_id`
-
-**Streaming iteration (HIGH confidence — source verified):**
-- Uses async iteration over `ChatCompletionChunk` objects
-- `chunk.choices[0]?.delta?.content` is the standard access pattern
-- `chunk.choices[0]?.finish_reason` signals end-of-stream content (but `[DONE]` terminates the loop)
-- `chunk.object` must be `"chat.completion.chunk"` — the TypeScript type is `Literal`
-
-**temperature = 0 warning:**
-- Groq silently converts `temperature: 0` to `1e-8`; this is transparent to clients but means exact zero-temperature reproducibility is not guaranteed on the Groq path
+The Node client returns a plain object for `json`/`verbose_json` and a `string` for text formats.
 
 ### openai-python
 
-**Error parsing (HIGH confidence — source verified):**
-- `_make_status_error_from_response` parses the body as JSON opaquely (no field-level validation at the base client level)
-- The Python SDK uses HTTP status code to select the exception class (`AuthenticationError` on 401, `RateLimitError` on 429, etc.)
-- The `body` property on exceptions holds the parsed JSON dict
-- Implication: correct HTTP status codes matter more than the `type` field for Python exception routing; the `type` field in the body is advisory for Python clients
+```python
+client.audio.transcriptions.create(
+    file=open("audio.mp3", "rb"),
+    model="whisper-1",
+    response_format="verbose_json",
+    timestamp_granularities=["word"]
+)
+```
 
-**Streaming (HIGH confidence — source verified):**
-- `ChatCompletionChunk` is a Pydantic model with `Literal["chat.completion.chunk"]` on `object`
-- Pydantic will raise a `ValidationError` if `object` is not exactly `"chat.completion.chunk"` when using strict mode
-- `choices` is typed as `List[Choice]` — an empty `choices` array is valid only on the final usage chunk when `stream_options.include_usage` is true
+The Python client:
+1. Calls `extract_files(body, paths=[["file"]])` to pull out the file for multipart encoding
+2. Calls `maybe_transform(body, TranscriptionCreateParams)` to validate and serialize all other fields
+3. Sets `Content-Type: multipart/form-data` explicitly in extra headers
 
-### LiteLLM
+**Timestamp granularities encoding:** The Python client sends this as repeated form fields:
+```
+timestamp_granularities[]=word
+timestamp_granularities[]=segment
+```
 
-**Model field (MEDIUM confidence — docs + community sources):**
-- LiteLLM reads the `model` field from the response to track which model was used
-- Returning the upstream provider model ID instead of the logical alias will cause LiteLLM's tracking to show the wrong model
+Bun's `FormData.getAll("timestamp_granularities[]")` retrieves the array. This is the standard
+HTML array-in-form-data convention; Bun handles it natively.
 
-**Usage field (MEDIUM confidence):**
-- LiteLLM reads `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` for cost calculation
-- Missing `usage` causes LiteLLM to log a warning and skip cost attribution; not a crash but degrades observability
+### Raw curl (canonical wire format)
 
-**Error codes (MEDIUM confidence):**
-- LiteLLM maps HTTP status codes to retry behavior; 429 triggers backoff, 401 does not retry
-- Standard OpenAI error shapes ensure LiteLLM's error handler recognises the response correctly
+```bash
+curl https://localhost:3000/v1/audio/transcriptions \
+  -H "Authorization: Bearer PERSONAL_PROXY_API_KEY" \
+  -F file="@audio.mp3" \
+  -F model="whisper-large-v3-turbo" \
+  -F language="en" \
+  -F response_format="verbose_json" \
+  -F "timestamp_granularities[]=word" \
+  -F "timestamp_granularities[]=segment"
+```
 
-### General SSE / Streaming Clients (curl, fetch-based clients)
-
-**[DONE] sentinel (HIGH confidence — multiple sources):**
-- Must be sent as `data: [DONE]\n\n` (the exact bytes)
-- Clients that manually parse SSE check for this literal string to stop processing
-- Some clients also terminate on stream close, but the sentinel is the canonical signal
-
-**Chunk buffering (HIGH confidence):**
-- Must not buffer the entire response before flushing; clients that display partial output require incremental delivery
-- Bun's `Bun.serve()` supports streaming responses via `ReadableStream` — use this, not string concatenation
+curl uses `-F` to build multipart form data automatically. Each `-F` becomes one part.
+Array parameters use the `field[]` key convention.
 
 ---
 
 ## Feature Dependencies
 
 ```
-Bearer auth middleware
-  → runs before all protected routes
-  → required by: /v1/chat/completions, /v1/models, /internal/providers/status
+Bearer auth middleware (existing)
+  → covers /v1/audio/transcriptions automatically if route is registered under protected router
 
-Request-ID middleware
-  → runs before all routes
-  → produces: X-Request-ID header, log correlation ID
+Request-ID middleware (existing)
+  → adds X-Request-ID to all responses
 
-Model registry
-  → required by: model alias resolution, /v1/models response, provider routing
-  → feeds: provider router (which providers serve this alias)
+Multipart form parser (new)
+  → AUDIO-01 → required by all other audio features
 
-Provider router + state
-  → required by: chat completions dispatch
-  → feeds: cooldown manager, failover logic
+Request field validator (new, audio-specific)
+  → AUDIO-02 → runs after parsing, before upstream call
+  → rejects unsupported fields, formats, MIME types, oversized files
 
-Response normalizer
-  → required by: non-streaming completion, each streaming chunk
-  → strips: provider-specific fields
-  → rewrites: model field to logical alias
+Model alias resolver (extend existing)
+  → AUDIO-03 → resolves logical alias to Groq whisper model ID
+  → returns 400 for unknown aliases
 
-Stream relay
-  → required by: streaming chat completions
-  → depends on: response normalizer (per-chunk), upstream SDK async iterator
+Groq audio adapter (new)
+  → AUDIO-04 → forwards validated multipart form to Groq via raw fetch
+  → relays raw response body without SDK parsing
+  → captures Groq rate-limit headers for provider state
 
-Error response utility
-  → required by: auth middleware, request validation, model resolver, provider errors, routing errors
-  → must produce: {"error": {"message", "type", "code", "param"}} shape
+Error response utility (existing)
+  → used by all validation and upstream error paths
 ```
+
+---
+
+## Implementation Notes for Bun
+
+**FormData parsing is Bun-native:**
+```typescript
+const form = await request.formData();
+const file = form.get("file") as File;          // File extends Blob
+const model = form.get("model") as string;
+const granularities = form.getAll("timestamp_granularities[]"); // string[]
+```
+
+**Forwarding multipart to Groq without SDK:**
+Use `fetch()` with a new `FormData` object populated from the validated fields. Bun's `fetch`
+natively handles `FormData` as a body and sets the correct `Content-Type` with boundary.
+
+```typescript
+const upstream = new FormData();
+upstream.set("file", file, file.name);  // preserve filename for MIME inference
+upstream.set("model", groqModelId);
+if (language) upstream.set("language", language);
+// ... other validated fields
+
+const response = await fetch(`${GROQ_BASE_URL}/audio/transcriptions`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+  body: upstream,
+});
+```
+
+Do NOT set `Content-Type` manually — let Bun/Fetch set it with the boundary.
+
+**Known Bun issue:** Bun v1.x has intermittent multipart upload reliability issues under load
+(GitHub issues #19097, #21467). If integration tests reveal multipart failures, investigate
+whether the issue is in Bun's `FormData` serialization and consider pinning to a fixed Bun
+version or using a raw `Blob` body with manual boundary construction as a fallback.
 
 ---
 
 ## Sources
 
-- openai-node source `src/resources/chat/completions/completions.ts` — ChatCompletion, ChatCompletionChunk, Delta types: https://github.com/openai/openai-node
-- openai-node source `src/core/error.ts` — error body parsing, field extraction: https://github.com/openai/openai-node
-- openai-python source `src/openai/types/chat/chat_completion_chunk.py` — ChatCompletionChunk Pydantic model: https://github.com/openai/openai-python
-- openai-python source `src/openai/_base_client.py` — `_make_status_error_from_response`: https://github.com/openai/openai-python
-- Groq OpenAI compatibility docs (unsupported fields): https://console.groq.com/docs/openai
-- Groq API reference (x_groq field, usage_breakdown): https://console.groq.com/docs/api-reference
-- Cerebras chat completions API reference: https://inference-docs.cerebras.ai/api-reference/chat-completions
-- Context7 openai-node docs (streaming, Delta type, events): /openai/openai-node
-- Context7 openai-python docs (ChatCompletionChunk, stream events): /openai/openai-python
+- OpenAI audio transcriptions API reference: https://developers.openai.com/api/docs/api-reference/audio/createTranscription
+- OpenAI speech-to-text guide: https://developers.openai.com/api/docs/guides/speech-to-text
+- Groq speech-to-text documentation: https://console.groq.com/docs/speech-to-text
+- openai-node transcriptions source: https://github.com/openai/openai-node/blob/master/src/resources/audio/transcriptions.ts
+- openai-python transcriptions source: https://github.com/openai/openai-python/blob/main/src/openai/resources/audio/transcriptions.py
+- openai-python transcription tests (all params): https://github.com/openai/openai-python/blob/main/openai-python/tests/api_resources/audio/test_transcriptions.py
+- Bun FormData parsing guide: https://bun.com/docs/guides/http/file-uploads
+- Bun multipart issue tracker: https://github.com/oven-sh/bun/issues/19097
+- Context7 OpenAI API docs: /websites/developers_openai_api
+- Context7 openai-node: /openai/openai-node
+- Context7 openai-python: /openai/openai-python

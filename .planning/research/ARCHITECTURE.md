@@ -1,426 +1,496 @@
-# Architecture Research
+# Architecture Research: Audio Transcription Integration
 
-**Project:** bun-ai-api — OpenAI-Compatible Proxy (Refactor)
-**Researched:** 2026-06-04
-**Overall confidence:** HIGH (Bun docs verified via Context7; spec sourced from refactor.md)
-
----
-
-## Recommended Architecture
-
-```text
-Client
-  | Authorization: Bearer PERSONAL_PROXY_API_KEY
-  v
-┌─────────────────────────────────────────────────────────────────┐
-│  index.ts  —  Bun.serve() entry + route registration           │
-│                                                                  │
-│  routes/                                                         │
-│    health.ts            GET /health                             │
-│    ready.ts             GET /ready                              │
-│    models.ts            GET /v1/models                          │
-│    chat-completions.ts  POST /v1/chat/completions               │
-│    providers-status.ts  GET /internal/providers/status          │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │ calls middleware functions before dispatch
-                            v
-┌───────────────────────────────────────────────────────────────┐
-│  middleware/                                                    │
-│    auth.ts         — Bearer token validation, 401 on fail      │
-│    request-id.ts   — UUID stamp on every request               │
-└───────────────────────────┬───────────────────────────────────┘
-                            │ validated request object
-                            v
-┌───────────────────────────────────────────────────────────────┐
-│  routing/                                                       │
-│    provider-router.ts    — chooseEligibleProviders(), loop     │
-│    provider-state.ts     — ProviderState registry (in-memory)  │
-│    cooldown-manager.ts   — parse rate-limit headers, set/check │
-└───────────────────────────┬───────────────────────────────────┘
-                            │ selected provider + upstream model ID
-                            v
-┌───────────────────────────────────────────────────────────────┐
-│  providers/                                                     │
-│    provider-adapter.ts   — shared ProviderAdapter interface    │
-│    cerebras-adapter.ts   — wraps cerebras_cloud_sdk            │
-│    groq-adapter.ts       — wraps groq-sdk                      │
-└───────────────────────────┬───────────────────────────────────┘
-                            │ raw SDK response / stream
-                            v
-┌───────────────────────────────────────────────────────────────┐
-│  services/                                                      │
-│    model-registry.ts     — alias→{cerebras,groq} resolution    │
-│    response-normalizer.ts — strip vendor fields, rewrite model  │
-│    stream-relay.ts       — async generator → SSE Response      │
-└───────────────────────────┬───────────────────────────────────┘
-                            │ OpenAI-compatible Response
-                            v
-                         Client
-```
-
-Support modules (no request-path dependency):
-
-```text
-schemas/
-  chat-completions.ts   — allowlist field validator (pre-routing)
-
-utils/
-  errors.ts             — OpenAI-style error bodies (400/401/429/500)
-  logger.ts             — structured JSON logger, redacts secrets
-
-config.ts               — env var loader, validated at startup
-types.ts                — shared interfaces: ProviderState, ProviderAdapter,
-                          NormalizedRequest, NormalizedResponse, LogicalAlias
-```
+**Project:** bun-ai-api — POST /v1/audio/transcriptions milestone
+**Researched:** 2026-06-06
+**Overall confidence:** HIGH (Bun docs verified via official docs; whisper.cpp patterns verified via production examples)
 
 ---
 
-## Component Boundaries
+## Context: What Already Exists
 
-### `index.ts`
+The proxy has a flat root-level structure with these directories at the repo root:
 
-Owns: `Bun.serve()` instantiation, route table declaration, server lifecycle.
-Does not own: any business logic. Every route entry delegates immediately to a handler in `routes/`.
+```
+index.ts            — Bun.serve() createServer factory
+config.ts           — env loader
+types.ts            — shared interfaces
+model-registry.ts   — alias registry
+request-schema.ts   — Zod validation (chat completions)
+response-normalizer.ts
+routing/            — provider-state.ts, cooldown-manager.ts
+services/           — groq.ts, cerebras.ts (ProviderAdapter implementations)
+tests/              — integration/ and routing/ subdirectories
+```
 
-Pattern: routes declared as `{ "/v1/chat/completions": { POST: chatCompletionsHandler } }`. The `fetch` fallback returns 404. Middleware is applied inside each route handler via composed function calls, not a framework chain.
+The `createServer(adapters)` factory pattern is already established. Auth, request-ID, and structured logging are cross-cutting and already apply to every route.
 
-### `middleware/auth.ts`
+---
 
-Owns: extracting the `Authorization` header, constant-time comparison against `PERSONAL_PROXY_API_KEY`, returning `401` when absent or invalid.
-Does not own: request ID, logging, route logic.
-Called by: `chat-completions.ts`, `models.ts`, `providers-status.ts`. Health and ready routes do not require auth.
+## New Components
 
-Pattern (Bun has no built-in middleware pipeline — compose with higher-order functions):
+### `routes/audio-transcriptions.ts`
+
+**Responsibility:** Handle `POST /v1/audio/transcriptions`. Parse multipart form data, validate fields, delegate to the Whisper service, return OpenAI-compatible JSON.
+
+This is a route handler, not a provider adapter. It bypasses the LLM provider router entirely — Whisper is local, not a remote API with cooldowns and rate limits.
 
 ```typescript
-// middleware/auth.ts
-export function requireAuth(req: Request): Response | null {
-  const header = req.headers.get("Authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (!timingSafeEqual(token, config.personalProxyApiKey)) {
-    return errors.unauthorized();
-  }
-  return null; // pass
-}
-
-// usage in any route handler
-export async function POST(req: Request): Promise<Response> {
-  const authError = requireAuth(req);
-  if (authError) return authError;
-  // ...
-}
+// Minimal shape
+export async function handleAudioTranscriptions(
+    request: Request,
+    requestId: string
+): Promise<Response>
 ```
 
-### `middleware/request-id.ts`
+### `services/whisper.ts`
 
-Owns: generating a UUID for each request, attaching it as `X-Request-ID` to the outgoing response.
-Does not own: any routing, auth, or logging sink. Provides the request ID string; logger consumes it.
-
-### `routing/provider-state.ts`
-
-Owns: the single in-memory `ProviderState` map (keyed by provider name), all reads and mutations to that map (`markCooldown`, `markFailure`, `markSuccess`, `isEligible`, `snapshot`).
-Does not own: routing decisions, cooldown calculation. It is a pure state container with typed accessors.
-
-This is the only stateful singleton in the system. It must be a module-level singleton (not instantiated per-request) so state persists across requests within the same Bun process.
-
-### `routing/cooldown-manager.ts`
-
-Owns: parsing provider-specific rate-limit headers from upstream responses, computing `cooldownUntil` timestamps, calling `providerState.markCooldown(provider, until)`.
-Does not own: provider state storage, routing decisions.
-
-### `routing/provider-router.ts`
-
-Owns: the `chooseEligibleProviders(logicalAlias, state)` function and the failover loop. Reads `providerState` to filter eligible providers, advances the round-robin cursor, calls the adapter, invokes cooldown-manager on 429, drives the attempt loop.
-Does not own: HTTP, adapter implementation, state storage.
-
-### `providers/provider-adapter.ts`
-
-Owns: the `ProviderAdapter` interface definition.
-Does not own: implementation — this is the contract only.
+**Responsibility:** Encapsulate all Whisper subprocess logic. Write temp file, spawn `Bun.spawn()`, await exit, parse output, clean up temp file. Returns a typed result.
 
 ```typescript
-export interface ProviderAdapter {
-  readonly name: "cerebras" | "groq";
-  chatCompletions(
-    upstreamModelId: string,
-    body: NormalizedRequest,
-    signal: AbortSignal
-  ): Promise<ProviderResult>;
+export interface WhisperResult {
+    text: string;
+    language?: string;
+    duration?: number;
+    segments?: Array<{ start: number; end: number; text: string }>;
 }
 
-export type ProviderResult =
-  | { ok: true; streaming: false; data: RawCompletion; headers: Headers }
-  | { ok: true; streaming: true; stream: AsyncIterable<string>; headers: Headers }
-  | { ok: false; retryable: boolean; status: number; body: unknown; headers: Headers };
+export interface WhisperService {
+    transcribe(
+        audioBuffer: ArrayBuffer,
+        options: WhisperTranscribeOptions,
+        signal?: AbortSignal
+    ): Promise<WhisperResult>;
+}
+
+export interface WhisperTranscribeOptions {
+    language?: string;         // ISO-639-1 or "auto"
+    responseFormat?: "json" | "text" | "verbose_json" | "srt" | "vtt";
+    prompt?: string;           // forwarded as --prompt (if binary supports it)
+    temperature?: number;
+}
 ```
 
-### `providers/cerebras-adapter.ts` and `providers/groq-adapter.ts`
+This module is a self-contained I/O unit with no awareness of HTTP.
 
-Owns: SDK instantiation (module-level singleton), mapping `NormalizedRequest` to SDK call arguments, calling `sdk.chat.completions.create()`, returning a typed `ProviderResult`.
-Does not own: routing, state, response normalization, SSE relay. Provider-specific quirks (e.g. Cerebras `X-Cerebras-Version-Patch`, Groq `498` error code) are handled here and nowhere else.
+### `schemas/audio-transcriptions.ts`
 
-### `services/model-registry.ts`
+**Responsibility:** Zod validation for the multipart form fields. Parallel to `request-schema.ts` for chat completions.
 
-Owns: loading `MODEL_REGISTRY_JSON`, resolving `logicalAlias → { cerebras: string, groq: string }`, providing the set of providers that can serve a given alias.
-Does not own: routing decisions. Returns data; router decides.
+Fields to validate:
+- `file` — required, Blob, non-empty
+- `model` — required, must match `WHISPER_MODEL_ALIAS` (the proxy's logical alias for Whisper)
+- `language` — optional, ISO-639-1 string
+- `response_format` — optional, enum: `json | text | verbose_json | srt | vtt`
+- `prompt` — optional, string
+- `temperature` — optional, number 0–1
 
-### `services/response-normalizer.ts`
-
-Owns: stripping Cerebras-specific fields (`choices[*].message.reasoning`, `reasoning_logprobs`, `time_info`), stripping Groq telemetry, rewriting `model` field to the logical alias.
-Does not own: adapter call, streaming logic. Operates on already-received objects.
-For streaming: normalizes each SSE chunk's `model` field inline as it passes through `stream-relay.ts`.
-
-### `services/stream-relay.ts`
-
-Owns: wrapping a provider SDK `AsyncIterable<string>` into a Bun `Response` with `Content-Type: text/event-stream`, setting `server.timeout(req, 0)` to disable idle timeout, forwarding chunks without buffering, detecting client disconnect via `AbortSignal` or `ReadableStream.cancel`.
-Does not own: upstream SSE parsing, response normalization decisions (calls normalizer per chunk).
-
-### `schemas/chat-completions.ts`
-
-Owns: runtime validation of the POST body against the allowlisted field set. Rejects `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`, `n != 1`. Returns typed `NormalizedRequest` on success, or an error descriptor on failure.
-Does not own: provider routing, auth.
-
-### `utils/errors.ts`
-
-Owns: factory functions for OpenAI-style error response bodies (`{ error: { message, type, code } }`), HTTP status codes 400/401/429/500/503.
-Does not own: logging, routing.
-
-### `utils/logger.ts`
-
-Owns: structured JSON log output per-request (request ID, provider, latency, status, failover reason, token usage, quota headers). Redacts secrets. Accepts `LOG_LEVEL` env to suppress verbosity.
-Does not own: anything else.
-
-### `config.ts`
-
-Owns: reading and validating all env vars at startup, exporting a frozen config object. Fails fast if required vars are absent.
-Does not own: any request handling.
+Reject unknown fields (consistent with chat completions schema approach using `z.strictObject()`).
 
 ---
 
-## Data Flow
+## Modified Components
 
-### Non-Streaming Completion
+### `index.ts` — Route Registration
 
-```
-1. Client:  POST /v1/chat/completions { Authorization: Bearer ... }
-2. index.ts:  dispatch to routes/chat-completions.ts POST handler
-3. middleware/request-id.ts:  generate requestId (UUID)
-4. middleware/auth.ts:  validate Bearer token → 401 or pass
-5. schemas/chat-completions.ts:  validate body fields → 400 or NormalizedRequest
-6. services/model-registry.ts:  resolve logical alias → upstreamModelIds per provider → 400 if unknown
-7. routing/provider-router.ts:  filter eligible providers, sort by round-robin cursor
-8.   for each eligible provider (up to MAX_PROVIDER_ATTEMPTS_PER_REQUEST):
-       a. routing/provider-state.ts:  check isEligible() — skip if in cooldown
-       b. providers/<name>-adapter.ts:  call SDK, await result
-       c. if ok:
-            services/response-normalizer.ts:  strip vendor fields, rewrite model alias
-            routing/provider-state.ts:  markSuccess()
-            utils/logger.ts:  log request metadata
-            return normalized Response with X-Request-ID header
-       d. if retryable (408/429/498/500-504):
-            routing/cooldown-manager.ts:  parse headers, compute cooldownUntil
-            routing/provider-state.ts:  markCooldown() or markFailure()
-            continue to next provider
-       e. if not retryable (400/401/403/404/422/413):
-            utils/errors.ts:  map to OpenAI error body
-            return immediately (no failover)
-9. if all providers exhausted:
-     utils/errors.ts:  503 no provider available
-     utils/logger.ts:  log exhaustion event
+Add one route match inside the existing `createServer` fetch handler, after the auth gate:
+
+```typescript
+if (request.method === 'POST' && pathname === '/v1/audio/transcriptions') {
+    return handleAudioTranscriptions(request, requestId);
+}
 ```
 
-### Streaming Completion
+No other structural changes. The auth gate, request-ID generation, and `withRequestId` wrapper already apply before this branch is reached.
 
-```
-1–7: Same as non-streaming (auth → validation → alias resolution → eligibility)
-8.   routing/provider-router.ts:  select first eligible provider
-       a. providers/<name>-adapter.ts:  call SDK with stream: true
-       b. if first chunk NOT yet sent and error occurs:
-            → same failover as non-streaming (try next provider)
-       c. once first chunk sent:
-            → NO failover; preserve stream integrity per spec (refactor.md §14)
-            services/stream-relay.ts:  wrap provider AsyncIterable<string> in async generator
-              - per chunk: services/response-normalizer.ts rewrites model field
-              - server.timeout(req, 0) disables idle timeout
-              - ReadableStream.cancel fires when client disconnects → abort upstream
-              - yield formatted SSE data: lines
-              - yield final "data: [DONE]\n\n" sentinel
-            return Response(asyncGenerator, { "Content-Type": "text/event-stream" })
+### `config.ts` — New Env Vars
+
+Add three new fields:
+
+```typescript
+whisperBinary: process.env["WHISPER_BINARY"] ?? "whisper-cli",
+whisperModelPath: process.env["WHISPER_MODEL_PATH"] ?? "",
+whisperModelAlias: process.env["WHISPER_MODEL_ALIAS"] ?? "whisper-1",
+whisperConcurrencyLimit: Number(process.env["WHISPER_CONCURRENCY_LIMIT"] ?? 1),
+whisperTimeoutMs: Number(process.env["WHISPER_TIMEOUT_MS"] ?? 300000),
 ```
 
-### Provider State Transitions
+`whisperModelPath` is required at startup if audio transcription is enabled. Validate at startup: if `WHISPER_MODEL_PATH` is set but the file does not exist, log a warning (not a fatal error — the proxy remains useful for LLM completions).
+
+### `types.ts` — New Shared Types
+
+Add `WhisperResult` and `WhisperTranscribeOptions` interfaces. Keep them in `types.ts` alongside existing interfaces to maintain the one-file-for-contracts convention.
+
+### `GET /ready` route in `index.ts`
+
+Optionally extend `ready` response to include Whisper availability:
+
+```json
+{
+  "ready": true,
+  "mode": "ok",
+  "eligibleProviders": ["cerebras", "groq"],
+  "audioTranscription": { "available": true, "model": "whisper-1" }
+}
+```
+
+Only add if `WHISPER_MODEL_PATH` is configured.
+
+---
+
+## Request Lifecycle
+
+**Step-by-step from HTTP receive through response:**
 
 ```
-ELIGIBLE
-  → on 429:      COOLDOWN (cooldownUntil = now + computed_seconds)
-  → on 5xx:      consecutiveFailures++ (ELIGIBLE until threshold → UNHEALTHY)
-  → on success:  consecutiveFailures = 0, lastSuccessAt = now
+1. Client: POST /v1/audio/transcriptions
+           Content-Type: multipart/form-data
+           Authorization: Bearer PERSONAL_PROXY_API_KEY
+           Body: file=<audio blob>, model=whisper-1, [language=en], [response_format=json]
 
-COOLDOWN
-  → isEligible() checks Date.now() > cooldownUntil → back to ELIGIBLE automatically
-  → no explicit transition needed; time-based check in provider-router
+2. index.ts Bun.serve() fetch handler
+   → generates requestId (existing OBS-01 pattern)
+   → health/ready check: skipped (these are GET)
+   → auth gate (existing): validates Bearer token → 401 on fail
 
-UNHEALTHY (repeated failures)
-  → manual re-enable via /ready re-check or restart
-  → /internal/providers/status exposes this state
+3. Route dispatch: POST /v1/audio/transcriptions matched
+   → routes/audio-transcriptions.ts handleAudioTranscriptions(request, requestId)
+
+4. Parse multipart form data
+   → await request.formData()   [Bun native — verified via docs]
+   → const file = formData.get("file") as File | null
+   → extract: model, language, response_format, prompt, temperature
+
+5. schemas/audio-transcriptions.ts validation
+   → reject unknown fields
+   → reject missing file
+   → reject unknown model alias
+   → return 400 OpenAI error on failure (same openaiError() helper as chat completions)
+
+6. Read audio bytes
+   → const audioBuffer = await file.arrayBuffer()
+   → size check: if > MAX_REQUEST_BODY_BYTES → 413
+
+7. services/whisper.ts transcribe()
+   a. Acquire concurrency slot (semaphore, if WHISPER_CONCURRENCY_LIMIT > 1)
+   b. Write temp file: await Bun.write(tmpPath, audioBuffer)
+   c. Build Bun.spawn() command array
+   d. Await proc.exited with timeout
+   e. Read output (from temp output file or stdout depending on format)
+   f. Delete temp files (try/finally)
+   g. Release concurrency slot
+   h. Return WhisperResult or throw typed WhisperError
+
+8. routes/audio-transcriptions.ts
+   → map WhisperResult to OpenAI response shape based on response_format
+   → return withRequestId(new Response(body, { status: 200 }))
+
+9. Log structured request_complete event (same pattern as chat completions)
+   → requestId, route, latencyMs, statusCode, model alias
+   → do NOT log audio content or transcription text
 ```
 
 ---
 
-## Stateful Components
+## Whisper Process Model
 
-### `routing/provider-state.ts` — The Only Mutable Singleton
+**Recommendation: per-request subprocess, not persistent process.**
 
-```typescript
-// Module-level singleton — lives for process lifetime
-const state: Map<ProviderName, ProviderState> = new Map([
-  ["cerebras", initialState("cerebras")],
-  ["groq", initialState("groq")],
-]);
+### Why not persistent process (HTTP server mode)
 
-// All mutations go through typed functions — no direct Map access outside this module
-export function markCooldown(name: ProviderName, cooldownUntil: number): void { ... }
-export function markSuccess(name: ProviderName, statusCode: number): void { ... }
-export function markFailure(name: ProviderName, statusCode: number): void { ... }
-export function isEligible(name: ProviderName, now = Date.now()): boolean { ... }
-export function snapshot(): ReadonlyMap<ProviderName, Readonly<ProviderState>> { ... }
-```
+whisper.cpp ships a `whisper-server` binary that runs an HTTP server with mutex-based request serialization. Running it as a sidecar would require:
 
-Safety in single-process Bun: Bun's event loop is single-threaded. JavaScript is not concurrent — only interleaved. Two requests cannot simultaneously mutate the same variable because only one microtask runs at a time. The existing non-atomic `let currentServiceIndex++` in `index.ts` is safe at the JS level; it is incorrect only because interleaving can produce "both requests pick the same index" when the increment is between await points. Moving all state mutations into synchronous functions (no `await` inside the mutation itself) eliminates the interleaving window entirely.
+- Managing a second long-running process from Bun (health checks, restart on crash)
+- HTTP-to-HTTP forwarding (adds latency, adds complexity)
+- A different startup sequence for model loading
+- Network port allocation and potential port conflicts in containerized environments
 
-Round-robin cursor implementation:
+The benefit — model stays loaded in memory — only matters when throughput is high. For a personal proxy with low concurrency this adds operational complexity without a proportional benefit.
+
+**Ruling: run the CLI binary per-request.**
+
+### Per-request subprocess pattern (chosen)
 
 ```typescript
-// Synchronous — no await inside, so no interleaving risk
-let cursor = 0;
-export function nextCursor(eligible: ProviderName[]): ProviderName {
-  if (eligible.length === 0) throw new NoEligibleProviderError();
-  const chosen = eligible[cursor % eligible.length];
-  cursor = (cursor + 1) % Number.MAX_SAFE_INTEGER; // prevent overflow
-  return chosen;
+// services/whisper.ts
+const proc = Bun.spawn({
+    cmd: [config.whisperBinary, "-m", config.whisperModelPath, "-f", tmpInputPath,
+          "--output-json", "--output-file", tmpOutputBase, "-l", language, "-t", "2"],
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: config.whisperTimeoutMs,   // Bun native timeout — kills proc on expiry
+    signal,                              // AbortSignal from request handler
+});
+
+await proc.exited;
+
+if (proc.exitCode !== 0) {
+    const stderr = await proc.stderr.text();
+    throw new WhisperError(`whisper process failed (exit ${proc.exitCode}): ${stderr}`);
 }
 ```
 
-The `rateLimitSnapshot` field inside `ProviderState` is written synchronously after each upstream response header parse. It is safe to snapshot for the diagnostics endpoint.
+**Key tradeoff:** The whisper.cpp binary loads the model into memory on each invocation. For `ggml-base` (~150 MB) on modern hardware this is ~1–2 seconds of startup overhead per request. For a personal proxy where requests are infrequent and sequential this is acceptable.
 
-No locks, mutexes, or atomics are needed. The single-threaded event loop provides the isolation guarantee. This changes only if Bun workers or `Bun.Worker` threads are introduced — which the spec explicitly defers.
+**If startup latency becomes unacceptable:** the architecture can later be upgraded to a persistent whisper-server sidecar. The service boundary in `services/whisper.ts` makes this swap transparent to the route handler.
+
+### Concurrency: serialization via semaphore
+
+whisper.cpp is single-threaded during inference and CPU-intensive. Running two simultaneous transcriptions saturates CPU and doubles latency for both. The correct design serializes requests through a simple semaphore:
+
+```typescript
+// services/whisper.ts — module-level semaphore
+let activeTranscriptions = 0;
+
+async function acquireSlot(): Promise<void> {
+    while (activeTranscriptions >= config.whisperConcurrencyLimit) {
+        await Bun.sleep(50);  // poll — acceptable for low-concurrency personal proxy
+    }
+    activeTranscriptions++;
+}
+
+function releaseSlot(): void {
+    activeTranscriptions = Math.max(0, activeTranscriptions - 1);
+}
+```
+
+For `WHISPER_CONCURRENCY_LIMIT=1` (the default), this serializes all transcriptions. Callers queue and wait, which is correct behavior — excess concurrency would degrade everyone's latency.
+
+**If a promise-based queue is preferred over polling:** a simple `AsyncQueue` backed by an array of resolve functions avoids the `Bun.sleep` loop and is O(1) per enqueue/dequeue. Either approach is appropriate for this use case.
+
+---
+
+## Temp File Management
+
+**Pattern: write input file, spawn process, clean up in `finally`.**
+
+whisper.cpp requires an input file path — it cannot read from stdin (stdin support has been requested but not shipped as of 2026). The output JSON is written to a file named `<base>.json` by the binary.
+
+```typescript
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { unlink } from "node:fs/promises";
+
+async function transcribe(audioBuffer: ArrayBuffer, opts: WhisperTranscribeOptions): Promise<WhisperResult> {
+    const id = crypto.randomUUID();
+    const tmpInputPath = join(tmpdir(), `whisper-in-${id}.wav`);
+    const tmpOutputBase = join(tmpdir(), `whisper-out-${id}`);
+    const tmpOutputJson = `${tmpOutputBase}.json`;
+
+    try {
+        await Bun.write(tmpInputPath, audioBuffer);
+
+        const proc = Bun.spawn({
+            cmd: buildWhisperCmd(tmpInputPath, tmpOutputBase, opts),
+            stdout: "ignore",
+            stderr: "pipe",
+            timeout: config.whisperTimeoutMs,
+        });
+
+        await proc.exited;
+
+        if (proc.exitCode !== 0) {
+            const errText = await proc.stderr.text();
+            throw new WhisperError(proc.exitCode ?? -1, errText);
+        }
+
+        const outputFile = Bun.file(tmpOutputJson);
+        const raw = await outputFile.json() as WhisperJsonOutput;
+        return parseWhisperJson(raw);
+
+    } finally {
+        // Best-effort cleanup — never throw from cleanup
+        await Promise.allSettled([
+            unlink(tmpInputPath).catch(() => {}),
+            unlink(tmpOutputJson).catch(() => {}),
+        ]);
+    }
+}
+```
+
+**Why `node:os` tmpdir and `node:fs/promises` unlink:** Bun is Node.js-compatible for these APIs. `Bun.write()` handles the write; `node:fs/promises` `unlink` handles deletion. Avoid leaving temp files on disk on error paths — the `finally` block covers both success and all failure modes.
+
+**Audio format note:** whisper.cpp requires 16kHz mono WAV. If the client uploads MP3, M4A, or other formats, the binary will fail. The route handler should either:
+1. Reject non-WAV formats with a 400 explaining the limitation (simplest for MVP).
+2. Optionally invoke `ffmpeg` before whisper if `ffmpeg` is available (deferred to later).
+
+The `Content-Type` of the file field and its extension are not reliable format indicators — whisper will simply report an error on bad input. The safest MVP approach is to document the WAV requirement and return the binary's stderr as the error message.
+
+---
+
+## Whisper Command Structure
+
+Based on research into whisper.cpp CLI flags:
+
+```bash
+whisper-cli \
+  -m /path/to/ggml-model.bin \   # WHISPER_MODEL_PATH
+  -f /tmp/whisper-in-<uuid>.wav \ # temp input file
+  --output-json \                  # produces <output-base>.json
+  --output-file /tmp/whisper-out-<uuid> \ # base name without extension
+  -l en \                          # language (from request, or "auto" for detect)
+  -t 2 \                           # thread count (keep low to avoid CPU starvation)
+  --no-prints                      # suppress progress output to stderr (if supported)
+```
+
+The JSON output file (`<base>.json`) contains a `transcription` array with segments:
+
+```json
+{
+  "transcription": [
+    { "timestamps": { "from": "00:00:00,000", "to": "00:00:05,120" },
+      "offsets": { "from": 0, "to": 5120 },
+      "text": " Hello, this is a test." }
+  ]
+}
+```
+
+The OpenAI response for `response_format=json` is:
+
+```json
+{ "text": "Hello, this is a test." }
+```
+
+For `verbose_json`:
+
+```json
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 5.12,
+  "text": "Hello, this is a test.",
+  "segments": [
+    { "id": 0, "start": 0.0, "end": 5.12, "text": " Hello, this is a test." }
+  ]
+}
+```
+
+The `parseWhisperJson` function concatenates segment text fields and maps timestamps from millisecond offsets to float seconds.
+
+---
+
+## Configuration
+
+All new env vars go in `config.ts` alongside existing vars. No new config file needed.
+
+| Env var | Default | Required | Notes |
+|---------|---------|----------|-------|
+| `WHISPER_BINARY` | `whisper-cli` | No | Path or binary name on PATH |
+| `WHISPER_MODEL_PATH` | `""` | Yes (if feature used) | Absolute path to `.bin` model file |
+| `WHISPER_MODEL_ALIAS` | `whisper-1` | No | Logical alias exposed in `/v1/models` |
+| `WHISPER_CONCURRENCY_LIMIT` | `1` | No | Max simultaneous transcriptions |
+| `WHISPER_TIMEOUT_MS` | `300000` | No | 5 min; kill proc if exceeded |
+
+**Validation approach:** On startup, if `WHISPER_MODEL_PATH` is non-empty, check that the file exists using `Bun.file(path).exists()`. If absent, log a `warn`-level structured message but do not crash — the proxy can still serve LLM completions. The audio route handler checks availability at request time and returns a 503 if Whisper is not configured.
+
+**`/v1/models` extension:** If `WHISPER_MODEL_ALIAS` is configured and `WHISPER_MODEL_PATH` exists, include the Whisper alias in the models list alongside the LLM aliases. This is the correct OpenAI-compatible behavior — clients discover available models before calling.
+
+---
+
+## Whisper Is Not a Provider Adapter
+
+**Do not route Whisper through the existing `ProviderAdapter` / `chooseEligibleProviders` system.**
+
+The existing provider router exists to:
+- Select between Cerebras and Groq
+- Track cooldowns after 429 responses
+- Fail over to an alternate provider on transient errors
+
+Whisper has none of these properties:
+- There is no second Whisper provider to fail over to
+- There are no rate limit headers to parse
+- There are no cooldown windows
+- It is local — failures are process errors, not HTTP status codes
+
+Forcing Whisper into the `ProviderAdapter` interface would require stubbing all the routing fields (cooldown, failover, eligibility) with no-ops and would make the code misleading. The correct architecture is a separate, simpler service module.
+
+**The analogy is:** Whisper is to audio transcriptions what `model-registry.ts` is to model resolution — a focused service module called directly from a route handler, not a generalized adapter plugged into the router.
+
+---
+
+## OpenAI Wire Compatibility
+
+The OpenAI `/v1/audio/transcriptions` endpoint accepts:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `file` | File (multipart) | Yes | Audio file blob |
+| `model` | string | Yes | `whisper-1` in OpenAI's case |
+| `language` | string | No | ISO-639-1 (e.g., `"en"`) |
+| `response_format` | string | No | `json` (default), `text`, `verbose_json`, `srt`, `vtt` |
+| `prompt` | string | No | Style hint for the model |
+| `temperature` | number | No | 0–1 |
+
+The proxy should accept the same fields. For MVP: support `json` (default), `text`, and `verbose_json`. Defer `srt` and `vtt` — they require format-specific serialization and clients rarely need them from a personal proxy.
+
+The response `Content-Type` is `application/json` for all three supported formats (including `text` — OpenAI wraps it in JSON as `{ "text": "..." }`).
 
 ---
 
 ## Build Order
 
-Components are listed from least to most dependent. Implement in this sequence:
+Dependencies flow: config → types → schemas → services → routes → index.
 
-### Layer 0 — Foundation (no dependencies)
+### Step 1 — Config extension (low risk, no behavior change)
 
-1. `config.ts` — env var loading and validation. Every other module depends on this. Fail fast on missing required vars. Provides the frozen config object consumed everywhere.
+Add new env vars to `config.ts`. Write a startup validation helper that checks `WHISPER_MODEL_PATH` existence. Tests: verify config object has correct default values.
 
-2. `types.ts` — shared interfaces: `ProviderState`, `ProviderAdapter`, `NormalizedRequest`, `NormalizedResponse`, `ProviderName`, `LogicalAlias`, `ProviderResult`. No logic, just contracts.
+### Step 2 — Zod schema for audio transcriptions
 
-3. `utils/errors.ts` — OpenAI error response factories. Depends on nothing except `types.ts`. Needed by validation and routing layers.
+Create `schemas/audio-transcriptions.ts`. Test in isolation with valid and invalid form field sets. No I/O. This is the same pattern as `request-schema.ts` and can be built and tested entirely standalone.
 
-4. `utils/logger.ts` — structured JSON logger with log-level gating and secret redaction. Depends on `config.ts` for `LOG_LEVEL`.
+### Step 3 — Whisper service module
 
-### Layer 1 — Schema and Registration
+Create `services/whisper.ts`. This is the highest-risk component — it exercises `Bun.spawn`, temp file I/O, process exit codes, and JSON parsing.
 
-5. `schemas/chat-completions.ts` — allowlist validator. Depends on `types.ts` and `utils/errors.ts`. Can be unit-tested in isolation against raw objects.
+Build in sub-steps:
+- Write `buildWhisperCmd()` (pure function, testable without spawning)
+- Write `parseWhisperJson()` (pure function, testable with fixture JSON)
+- Write `transcribe()` with the full spawn/write/cleanup flow
+- Test with a real whisper binary and a short WAV file (integration test, requires binary on PATH)
+- Test error paths with a mock that returns non-zero exit codes (unit test with spawn mock)
 
-6. `services/model-registry.ts` — alias registry loader. Depends on `config.ts` (reads `MODEL_REGISTRY_JSON`). Returns pure data — no side effects, easily unit-tested.
+### Step 4 — Route handler
 
-### Layer 2 — State and Routing Logic
+Create `routes/audio-transcriptions.ts`. Wire schema validation → whisper service → response mapping. Test with mock whisper service (inject service instance for testability, consistent with `createServer(adapters)` pattern).
 
-7. `routing/provider-state.ts` — in-memory state container. Depends on `types.ts`. Unit-test all transitions: markCooldown, isEligible after expiry, markFailure threshold.
+### Step 5 — Register route in `index.ts`
 
-8. `routing/cooldown-manager.ts` — header parser and cooldown calculator. Depends on `provider-state.ts`, `config.ts` (for `DEFAULT_COOLDOWN_SECONDS`). Pure functions, unit-testable.
+Add route match. Run smoke test: send a valid multipart request and verify JSON response shape.
 
-9. `middleware/request-id.ts` — UUID generator. Depends on nothing.
+### Step 6 — Extend `/v1/models` and `/ready`
 
-10. `middleware/auth.ts` — Bearer token check. Depends on `config.ts`, `utils/errors.ts`.
+Add whisper alias to models list when configured. Extend ready response. These are low-risk additions to existing handlers.
 
-### Layer 3 — Provider Adapters
+### Step 7 — Integration test
 
-11. `providers/provider-adapter.ts` — interface definition only. Depends on `types.ts`.
-
-12. `providers/cerebras-adapter.ts` — wraps `cerebras_cloud_sdk`. Depends on `provider-adapter.ts`, `config.ts`, `types.ts`. Returns `ProviderResult`. No routing logic.
-
-13. `providers/groq-adapter.ts` — wraps `groq-sdk`. Same shape as Cerebras adapter. Groq-specific: handle `498` as retryable; map Groq error objects.
-
-### Layer 4 — Response Pipeline
-
-14. `services/response-normalizer.ts` — strip vendor fields, rewrite model. Depends on `types.ts`, `services/model-registry.ts`. Pure transformation functions — no I/O.
-
-15. `services/stream-relay.ts` — SSE relay. Depends on `response-normalizer.ts`, `types.ts`. Uses Bun-native async generator → Response pattern. `server.timeout(req, 0)` requires the `server` reference passed through from the route handler.
-
-### Layer 5 — Routing Orchestration
-
-16. `routing/provider-router.ts` — failover loop. Depends on `provider-state.ts`, `cooldown-manager.ts`, `provider-adapter.ts` (via injected adapters), `model-registry.ts`, `stream-relay.ts`, `response-normalizer.ts`, `logger.ts`. This is the most complex module; build after all its dependencies are tested.
-
-### Layer 6 — Route Handlers
-
-17. `routes/health.ts` — simplest handler. No auth, no routing. Build first to validate server boots.
-
-18. `routes/ready.ts` — reads `provider-state.ts` and `model-registry.ts`. Supports degraded mode.
-
-19. `routes/models.ts` — reads `model-registry.ts`. Requires auth.
-
-20. `routes/chat-completions.ts` — full path. Composes auth → schema → registry → router → relay. Requires all of layers 0–5.
-
-21. `routes/providers-status.ts` — reads `provider-state.ts` snapshot. Requires auth. Optional (`ENABLE_INTERNAL_STATUS_ENDPOINT`).
-
-### Layer 7 — Entry Point
-
-22. `index.ts` — `Bun.serve()` with route table. Import all route handlers. Minimal logic here; just wiring.
-
-### Layer 8 — Tests
-
-23. Unit tests for routing logic (alternation, cooldown, recovery, exhaustion) — can be written once Layer 5 exists.
-24. Integration tests for full request paths — require Layer 7.
+Add `tests/integration/audio-transcriptions.test.ts`. Mock the `WhisperService` interface (inject it like `ProviderAdapter`). Test:
+- Valid request returns 200 with `{ "text": "..." }`
+- Missing `file` field returns 400
+- Unknown model alias returns 400
+- Whisper process failure returns 500
+- Request when Whisper not configured returns 503
+- Auth gate: missing token returns 401
 
 ---
 
-## Key Architecture Decisions
+## Architecture Invariants to Preserve
 
-### No middleware framework — composed functions
-
-Bun.serve() has no built-in middleware pipeline. The correct pattern (confirmed by Bun docs) is higher-order functions. Each route handler calls `requireAuth(req)` and similar functions synchronously before proceeding. This is explicit, traceable, and avoids hidden control flow.
-
-### Async generator for SSE relay (not ReadableStream constructor)
-
-Both patterns work in Bun (confirmed via Context7). The async generator form is simpler and closer to the provider SDK's `AsyncIterable<string>` output:
-
-```typescript
-return new Response(
-  async function* () {
-    for await (const chunk of providerStream) {
-      yield normalizeChunk(chunk); // inline normalization
-    }
-    yield "data: [DONE]\n\n";
-  },
-  { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } }
-);
-```
-
-When the client disconnects, Bun cancels the async generator automatically. `server.timeout(req, 0)` must be called before returning the Response to prevent Bun's 10-second idle timeout from closing LLM streams that have momentary silences between tokens.
-
-### Single ProviderState singleton — no class instances
-
-A module-level `Map` with typed accessor functions is sufficient for a single-process server. No class needed; no constructor injection. Tests can reset state by calling an exported `resetForTesting()` function that re-initializes the map.
-
-### Adapters accept AbortSignal
-
-Every SDK call should accept an `AbortSignal` passed from the route handler. For streaming, this is the mechanism by which downstream disconnect aborts the upstream SDK call. Both `groq-sdk` and `cerebras_cloud_sdk` SDK calls accept standard `signal` options.
-
-### Flat root-level structure (not src/)
-
-Matches the project constraint. Directories (`routes/`, `middleware/`, `routing/`, `providers/`, `services/`, `schemas/`, `utils/`) sit directly at the repo root alongside `index.ts`, `config.ts`, `types.ts`.
+1. **Never log audio content or transcription text** — same as "never log full prompts" rule in the LLM path.
+2. **Temp files are always deleted** — the `finally` block must run even if the request is aborted.
+3. **Auth gate applies** — the audio route sits behind the existing Bearer token check, same as all other routes.
+4. **`X-Request-ID` on every response** — the existing `withRequestId` wrapper applies.
+5. **OpenAI error shape on all errors** — use the existing `openaiError()` helper for 400/401/413/500/503 paths.
+6. **Structured logs on every request** — log the same `request_complete` event fields (requestId, route, latencyMs, statusCode). Do not log audio bytes or text.
 
 ---
 
 ## Sources
 
-- Bun SSE + async generator docs: https://github.com/oven-sh/bun/blob/main/docs/guides/http/sse.mdx (Context7 /oven-sh/bun — HIGH confidence)
-- Bun.serve() routing patterns: https://github.com/oven-sh/bun/blob/main/docs/runtime/http/routing.mdx (Context7 /oven-sh/bun — HIGH confidence)
-- Bun streaming docs: https://github.com/oven-sh/bun/blob/main/docs/runtime/streams.mdx (Context7 /oven-sh/bun — HIGH confidence)
-- Bun server.timeout for streaming: https://github.com/oven-sh/bun/blob/main/docs/runtime/http/server.mdx (Context7 /oven-sh/bun — HIGH confidence)
-- Refactor spec architecture section (§21–23): refactor.md in project root
-- Current architecture analysis: .planning/codebase/ARCHITECTURE.md
+- Bun.spawn API: https://bun.sh/docs/api/spawn (HIGH — official docs)
+- Bun FormData / file uploads: Context7 /oven-sh/bun docs/guides/http/file-uploads.mdx (HIGH — official)
+- Bun.spawn timeout and AbortSignal: https://bun.sh/docs/api/spawn (HIGH — official docs)
+- whisper.cpp HTTP server architecture (mutex serialization, persistent model): https://deepwiki.com/ggml-org/whisper.cpp/3.2-http-server (MEDIUM — community wiki)
+- whisper.cpp CLI flags (--output-json, --output-file, --language, -t): https://til.simonwillison.net/macos/whisper-cpp (MEDIUM — practitioner blog)
+- whisper.cpp JSON output structure and concurrency semaphore pattern: https://sendrec.eu/blog/how-we-added-automatic-transcription-with-whisper/ (MEDIUM — production case study)
+- OpenAI /v1/audio/transcriptions field specification: https://platform.openai.com/docs/api-reference/audio/createTranscription (HIGH — official, via web search verification)
+- Existing proxy architecture: .planning/codebase/ARCHITECTURE.md

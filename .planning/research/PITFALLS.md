@@ -1,455 +1,754 @@
-# Pitfalls Research
+# Pitfalls Research: Local Audio Transcription
 
-**Domain:** OpenAI-compatible proxy middleware (Bun, Cerebras + Groq)
-**Researched:** 2026-06-04
-**Overall Confidence:** HIGH — most claims verified against official SDK docs and Bun docs
-
----
-
-## Critical Pitfalls
-
-### P-CRIT-1: SDK Built-In Retries Fight Proxy-Level Failover
-
-**What goes wrong:** Both `groq-sdk` and `@cerebras/cerebras_cloud_sdk` retry automatically up to 2 times by default with exponential backoff on 429, 408, 409, and >=500 errors. When the proxy also tries to fail over to the alternate provider, the SDK silently retries the same failing provider first — delaying the failover by the full backoff window. A 429 from Groq can produce a 47-second delay before the proxy-level fallback fires, because the SDK consumed both retry slots internally.
-
-**Root cause:** The SDK's `maxRetries` defaults to 2, and neither SDK exposes a callback to observe retry attempts. The proxy has no visibility into in-flight SDK retries.
-
-**Consequence:** The spec requires `MAX_PROVIDER_ATTEMPTS_PER_REQUEST=2` (two total provider tries), but SDK retries burn time before the proxy's failover logic runs at all. Under quota pressure, a 429 that should trigger immediate failover causes a 30-60 second hang.
-
-**Prevention:** Initialize both SDK clients with `maxRetries: 0`. The proxy owns retry policy; the SDK must not second-guess it.
-
-```typescript
-const groq = new Groq({ apiKey: ..., maxRetries: 0 });
-const cerebras = new Cerebras({ apiKey: ..., maxRetries: 0 });
-```
-
-**Warning signs:** Tests showing 30-60 second delays on 429 errors; double-cooldown calculations.
-
-**Phase:** Implement at adapter construction time (Phase 1, provider adapter setup).
+**Domain:** Adding POST /v1/audio/transcriptions (local Whisper) to existing Bun proxy
+**Researched:** 2026-06-06
+**Milestone context:** Subsequent milestone — existing chat proxy is production-stable; this adds a
+local-inference route alongside it.
+**Overall Confidence:** HIGH — Bun-specific issues verified against open GitHub issues; Whisper
+behavior from official repo discussions; subprocess/temp-file patterns from Node/Bun documentation.
 
 ---
 
-### P-CRIT-2: SDK Default Timeout Is 1 Minute (Groq) — Mismatches Proxy Timeout
+## Critical Pitfalls (will break things)
 
-**What goes wrong:** `groq-sdk` defaults to a 1-minute request timeout. `@cerebras/cerebras_cloud_sdk` also has a default timeout. If `REQUEST_TIMEOUT_MS` is set to 120 seconds but the SDK fires its own timeout at 60 seconds, the proxy receives a timeout error from the SDK before the configured proxy timeout fires. The error will surface as `APIConnectionTimeoutError`, not as an HTTP status code, requiring adapter-level handling distinct from HTTP error handling.
+### AUDIO-CRIT-1: Bun `request.formData()` Throws on Missing or Malformed Multipart Boundary
 
-**Prevention:** Set explicit `timeout` on SDK client construction equal to `REQUEST_TIMEOUT_MS` plus a small buffer (e.g., 5 seconds over proxy timeout) so the proxy timeout fires first via `AbortSignal`, not the SDK.
+**What goes wrong:** Bun's built-in multipart parser requires the `Content-Type: multipart/form-data;
+boundary=<value>` header to include an exact boundary token. If the client sends the header as just
+`multipart/form-data` without the boundary parameter — which some HTTP clients do when boundary
+generation is misconfigured — `await request.formData()` throws a TypeError: "FormData parse error
+missing final boundary." The error is unhandled, crashes the fetch handler, and Bun returns an empty
+502 with no OpenAI-style error body.
 
-**Warning signs:** `APIConnectionTimeoutError` appearing instead of `AbortError` during timeout testing.
-
-**Phase:** Adapter construction (Phase 1).
-
----
-
-### P-CRIT-3: Streaming Failover After First Chunk Is Committed
-
-**What goes wrong:** The spec correctly forbids failover after the first streaming chunk is delivered to the downstream client. However, the boundary is subtle: once any `data:` line is written into the `ReadableStream` controller and flushed to the client, the response headers and status 200 are already committed. If the upstream provider then errors mid-stream, the proxy cannot return a 500 — the connection must be closed without a structured error. Attempting to write an error JSON body after a streaming response has started will silently corrupt the stream or be ignored.
-
-**Root cause:** HTTP does not allow changing the response status after headers are sent. SSE streams cannot be "un-started."
-
-**Consequence:** Any attempt to transparently retry a failed mid-stream response produces a truncated output with no client-visible error. The client's parser may hang waiting for `data: [DONE]`.
+There is also a confirmed Bun bug (issue #29630) where Bun's *own* FormData serializer emits a
+boundary with only one leading dash (`-WebkitFormBoundary…`), producing a 3-dash body-marker instead
+of the RFC-correct 4-dash format. Downstream parsers (including some openai-node versions) may reject
+this.
 
 **Prevention:**
-1. Track a `firstChunkSent` boolean flag inside the stream relay.
-2. Set it to `true` immediately after the first `controller.enqueue()` call.
-3. Before the streaming loop starts, all provider selection and pre-flight happens. The point of no return is the first enqueue, not the `return new Response(stream)` call.
-4. On mid-stream upstream error: close the stream (call `controller.close()` or `controller.error()`), which will cause the client connection to drop cleanly — no retry possible.
+- Wrap `await request.formData()` in try/catch and return an OpenAI-style 400 if parsing fails.
+- Log the raw `Content-Type` header value at DEBUG level so boundary problems are diagnosable.
+- Do not rely on Bun's FormData serializer when constructing test fixtures; use `@mjackson/multipart-parser` or raw boundary strings that match the RFC 4-dash format.
+- Validate that `Content-Type` contains `multipart/form-data` before calling `.formData()`.
 
-**Warning signs:** Missing `data: [DONE]` at end of stream; clients hanging after partial output.
+**Detection:** Empty 502 responses or "FormData parse error" in logs when audio upload clients are
+first integrated. Run the integration test with curl (`-F`) and with the openai-node SDK separately.
 
-**Phase:** Stream relay implementation.
-
----
-
-### P-CRIT-4: Cooldown Calculation Off-By-One With Provider Reset Headers
-
-**What goes wrong:** The spec formula is:
-```
-cooldownUntil = now + max(retryAfterSeconds, resetTokensSeconds, fallbackCooldownSeconds)
-```
-
-The reset headers from Groq (`x-ratelimit-reset-requests`, `x-ratelimit-reset-tokens`) are **duration strings** like `"2m59.56s"` or `"7.66s"` — not seconds as floats and not Unix timestamps. Treating them as raw numbers will produce wildly incorrect cooldowns (e.g., parsing `"7.66s"` as `7.66` seconds works accidentally, but `"2m59.56s"` parsed as a float returns `NaN` or `2` if truncated, causing a 2-second cooldown for a limit that resets in 3 minutes).
-
-Cerebras reset headers (`x-ratelimit-reset-requests-day`, `x-ratelimit-reset-tokens-minute`) **are** seconds as floats (`33011.38...`), not duration strings.
-
-Groq `retry-after` is a plain integer in seconds (`"2"`).
-
-**Prevention:** Parse all three formats explicitly:
-- Groq reset: duration string parser — extract minutes and seconds from patterns like `"2m59.56s"`, `"7.66s"`, `"120ms"`.
-- Cerebras reset: `parseFloat(value)` in seconds — values like `33011.38` mean seconds until daily reset (do not use the day-level value as a cooldown; use token-minute reset instead).
-- Groq `retry-after`: `parseInt(value, 10)` seconds.
-
-```typescript
-function parseGroqDuration(s: string): number {
-  // "2m59.56s" -> 179.56 seconds
-  // "7.66s" -> 7.66 seconds
-  // "120ms" -> 0.12 seconds
-  const minuteMatch = s.match(/(\d+)m/);
-  const secondMatch = s.match(/(\d+\.?\d*)s/);
-  const msMatch = s.match(/(\d+\.?\d*)ms/);
-  const minutes = minuteMatch ? parseFloat(minuteMatch[1]) : 0;
-  const seconds = secondMatch ? parseFloat(secondMatch[1]) : 0;
-  const ms = msMatch ? parseFloat(msMatch[1]) / 1000 : 0;
-  return minutes * 60 + seconds + ms;
-}
-```
-
-**Warning signs:** Cooldown values in the thousands of seconds; providers recovering in 2 seconds when they should take 3 minutes.
-
-**Phase:** Cooldown manager implementation.
+**Phase:** Multipart parsing layer (earliest, before any Whisper work).
 
 ---
 
-## Streaming Pitfalls
-
-### P-STREAM-1: Bun's Default 10-Second Idle Timeout Kills Quiet SSE Connections
-
-**What goes wrong:** Bun introduced a default `idleTimeout` of 10 seconds in v1.1.26 (later reverted to 0 in v1.1.27). The Dockerfile pins `oven/bun:1.1.29` which is well past v1.1.26 but the behavior depends on the exact version deployed. More importantly, any future Bun update may re-enable an idle timeout. A quiet SSE connection — for example, during Cerebras processing a large prompt before returning the first token — will be dropped after 10 seconds of silence.
-
-**Prevention:** Explicitly call `server.timeout(req, 0)` for all SSE responses in the route handler to disable the idle timeout for that specific request. Do not rely on the global default.
-
-```typescript
-routes: {
-  "/v1/chat/completions": async (req, server) => {
-    if (isStreamingRequest) {
-      server.timeout(req, 0);
-    }
-    // ...
-  }
-}
-```
-
-**Warning signs:** Streaming requests silently disconnecting after exactly 10 seconds with no upstream error.
-
-**Phase:** Streaming relay implementation.
-
----
-
-### P-STREAM-2: Async Generator Returning Function Reference Instead of Iterable
-
-**What goes wrong:** Already present as a bug in `services/cerebras.ts`. The pattern:
-```typescript
-return (async function* () { ... });  // BUG: returns function
-```
-instead of:
-```typescript
-return (async function* () { ... })();  // correct: invokes it
-```
-`new Response(fn, ...)` receives a function reference, not an async iterable. Bun's `Response` constructor silently accepts the function but produces an empty or broken body.
-
-**Prevention:** TypeScript `AIService` interface should declare `chat()` return type as `Promise<AsyncIterable<string>>`, not `Promise<AsyncGenerator<string>>`. The calling code should `for await (const chunk of await service.chat(...))` which will throw immediately if the generator is not invoked — producing a clear type error.
-
-**Warning signs:** Empty response body from Cerebras; no runtime error thrown.
-
-**Phase:** Already a known bug to fix in refactor Phase 1.
-
----
-
-### P-STREAM-3: Yielding Raw Delta Content Strings Breaks OpenAI SSE Wire Format
-
-**What goes wrong:** Current Groq and Cerebras services yield raw content strings (`yield chunk.choices[0]?.delta?.content || ''`). The OpenAI SSE wire format requires each event to be:
-```
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[...]}\n\n
-```
-not just the content string. An OpenAI SDK client parsing the stream will fail silently or throw because it expects to parse the `data:` prefixed JSON, not raw text.
-
-**Prevention:** The stream relay must serialize full `ChatCompletionChunk` objects as `data: <JSON>\n\n` lines, not raw content. The final sentinel must be exactly `data: [DONE]\n\n`.
-
-**Warning signs:** `openai` npm client throwing JSON parse errors when consuming the proxy's stream; curl showing plain text instead of `data:` prefixed lines.
-
-**Phase:** Stream relay implementation.
-
----
-
-### P-STREAM-4: Groq Streaming Usage Is in a Separate Extra Final Chunk
-
-**What goes wrong:** When `stream_options: { include_usage: true }` is passed to Groq, an extra chunk is appended before `data: [DONE]` with `choices: []` (empty) and a populated `usage` field. This does not match OpenAI's streaming format, where the final content chunk includes `finish_reason: "stop"`. Forwarding this extra chunk verbatim to clients expecting standard OpenAI streaming will produce a chunk with empty `choices` that some clients fail to parse.
-
-**Prevention:** Detect the Groq-specific pattern (empty `choices`, populated `usage`) in the stream relay's normalization pass. Merge the usage into the preceding `finish_reason: "stop"` chunk before forwarding, or drop the extra chunk if usage is not needed in stream output.
-
-**Warning signs:** Client parsing error on a chunk with `choices: []`; usage appearing in an unexpected position.
-
-**Phase:** Stream relay + response normalization.
-
----
-
-### P-STREAM-5: Cerebras Usage and time_info Only in Final Streaming Chunk
-
-**What goes wrong:** Cerebras sends `usage` and `time_info` only in the final streaming chunk (not in every chunk). If the stream relay yields content from `delta.content || ''` on every chunk, including the final one, it will also yield an empty string for the final metadata-only chunk. This empty yield becomes an extra `data: {"choices":[{"delta":{"content":""}}]}\n\n` event sent to the client. While not technically incorrect, it wastes bandwidth and can confuse strict parsers.
-
-**Secondary issue:** The `time_info` field must be stripped from all forwarded chunks since it is Cerebras-specific and not in the OpenAI spec.
-
-**Prevention:** Filter chunks with empty `delta.content` from the forward path. Strip `time_info` from all chunks before forwarding.
-
-**Phase:** Stream relay + response normalization.
-
----
-
-### P-STREAM-6: Upstream Abort Is Not Automatic on Client Disconnect
-
-**What goes wrong:** If the downstream client disconnects mid-stream (user closes browser tab, timeout on their end, etc.), the upstream provider call continues consuming tokens and quota. The Bun `ReadableStream` `cancel()` callback fires when the client disconnects — but only if the stream is constructed correctly as a `ReadableStream` with a `cancel` method, or if the async generator's `for await` loop is inside the response body generator.
-
-**Prevention:** Use Bun's native async generator response body pattern, which automatically cancels the generator when the client disconnects. If using `ReadableStream`, implement the `cancel()` callback to call `stream.controller.abort()` on the upstream SDK stream. Pass an `AbortController.signal` to each SDK call.
-
-```typescript
-const ac = new AbortController();
-const upstreamStream = await groq.chat.completions.create(
-  { ...params, stream: true },
-  { signal: ac.signal }
-);
-// In ReadableStream cancel: ac.abort();
-```
-
-**Warning signs:** Provider quota draining unexpectedly; upstream requests still running after client disconnects (visible via provider dashboards).
-
-**Phase:** Stream relay implementation.
-
----
-
-## Provider Compatibility Pitfalls
-
-### P-COMPAT-1: Cerebras Returns 400 (Not 422) for Unsupported Fields
-
-**What goes wrong:** Cerebras returns HTTP 400 (not 422) for unsupported parameters like `frequency_penalty` and `presence_penalty`. The proxy's error routing table treats 400 as "invalid payload; do not fail over." This is correct — a 400 from Cerebras means the request itself is invalid (likely a field not in the intersection contract slipped through), not that the provider is unhealthy.
-
-However, if the proxy forwards a request containing an unsupported field before validating at the proxy level, the 400 is unretryable and the request fails. The intersection validation (allowlist) must happen at the proxy before any upstream call.
-
-**Prevention:** The proxy's allowlist validation must fire before provider selection, not after. A 400 from upstream is a code defect (missed validation), not a routing decision.
-
-**Warning signs:** Upstream 400 errors appearing in logs for fields the proxy should have rejected; intermittent 400s when Cerebras receives a field that Groq silently accepts.
-
-**Phase:** Request validation (Phase 1).
-
----
-
-### P-COMPAT-2: Groq's `temperature = 0` Silently Mutates to `1e-8`
-
-**What goes wrong:** Groq converts `temperature: 0` to `1e-8` internally. This means requests sent with `temperature: 0` for exact determinism may not produce fully deterministic results on Groq. The proxy passes `temperature` through without noting this behavior. Clients expecting deterministic outputs at `temperature: 0` will observe variance on Groq-routed requests.
-
-**Prevention:** Document in the proxy's API contract that `temperature: 0` is not guaranteed deterministic across providers. Optionally intercept `temperature: 0` and warn in logs. Do not block the request — this is a known Groq behavior, not an error.
-
-**Warning signs:** Client regression tests that assert exact output at `temperature: 0` failing non-deterministically depending on which provider handles the request.
-
-**Phase:** Document in API contract; add to observability logging (Phase 2).
-
----
-
-### P-COMPAT-3: Cerebras Streaming Chunks Contain `delta.reasoning` Field
-
-**What goes wrong:** When a reasoning model is used (or reasoning is not explicitly disabled), Cerebras emits a `delta.reasoning` field in streaming chunks. This field is not in the OpenAI streaming spec. Forwarding it verbatim exposes chain-of-thought content to downstream clients, which the spec (section 26, rule 12) explicitly forbids. The reasoning content appears interleaved with `delta.content` chunks and must be stripped chunk-by-chunk, not just from the final response.
-
-**Prevention:** In the stream relay, for each chunk, delete `choices[i].delta.reasoning` and `choices[i].reasoning_logprobs` before forwarding. Checking only the final non-streaming response is insufficient — reasoning leaks through stream chunks.
-
-**Warning signs:** Downstream clients receiving `delta.reasoning` keys in streaming response; internal chain-of-thought visible to proxy users.
-
-**Phase:** Stream relay normalization.
-
----
-
-### P-COMPAT-4: Model Field in Streaming Chunks Uses Provider-Specific ID
-
-**What goes wrong:** Both Groq and Cerebras populate the `model` field in streaming chunks with the upstream provider-specific model ID (e.g., `"openai/gpt-oss-120b"` from Groq, `"gpt-oss-120b"` from Cerebras), not the logical proxy alias. The normalization step that rewrites `model` to the logical alias must apply to every chunk, not just the final non-streaming response.
-
-**Prevention:** In the stream relay's normalization pass, rewrite `chunk.model` to the logical alias for every forwarded chunk. This is straightforward since the logical alias is known at request time.
-
-**Warning signs:** Clients seeing provider-specific model IDs in streaming responses; alias leakage in chunk-level logs.
-
-**Phase:** Stream relay normalization.
-
----
-
-### P-COMPAT-5: Groq 498 Error Is Not Documented as Standard HTTP
-
-**What goes wrong:** Groq returns HTTP 498 for "Flex Tier Capacity Exceeded." This is a non-standard HTTP status code not defined in any RFC. TypeScript's `fetch` API, Groq's SDK, and any HTTP middleware will handle it as a generic 4xx error. The proxy's error routing table must explicitly handle 498 as "fail over to alternate provider" — it should not be treated as a client error (which would suppress failover).
-
-**Prevention:** Add explicit `case 498` in the error routing logic alongside `429`.
-
-**Warning signs:** Requests failing permanently when Groq returns 498 instead of routing to Cerebras.
-
-**Phase:** Error routing implementation.
-
----
-
-### P-COMPAT-6: Intersection Contract Drift When Provider Fields Are Silently Accepted
-
-**What goes wrong:** Groq may silently accept fields that Cerebras rejects (e.g., `frequency_penalty`). If a field is in the request and Groq succeeds, but Cerebras returns 400 on the next round-robin call, the behavior is non-deterministic from the client's perspective. The client gets alternating success/failure with no explanation.
-
-**Prevention:** Strict allowlist at proxy entry. Any field not on the explicit allowlist is rejected with 400 before it reaches any provider. The allowlist definition must be the intersection — fields accepted by both providers, tested.
-
-**Warning signs:** Alternating 200/400 responses for the same request payload.
-
-**Phase:** Request validation (Phase 1).
-
----
-
-## Security Pitfalls
-
-### P-SEC-1: SDK Error Objects May Include Provider Configuration Details
-
-**What goes wrong:** Catching `Cerebras.APIError` or `Groq.APIError` and propagating `err.message` or `err.headers` to the downstream client can expose provider base URLs, upstream auth error messages (e.g., "Invalid API key for https://api.groq.com"), internal request IDs, or rate-limit state. Both SDKs attach the HTTP response headers to error objects via `err.headers`.
-
-**Prevention:** In each adapter's catch block, log `err.status`, `err.headers`, and `err.message` to the structured server log (which never reaches the client), then return a sanitized OpenAI-style error to the client:
-```json
-{ "error": { "type": "upstream_error", "message": "Provider unavailable", "code": 503 } }
-```
-Never serialize the raw SDK error into the response body.
-
-**Warning signs:** Downstream clients receiving error messages containing provider URLs or SDK stack traces.
-
-**Phase:** Error handling in adapters (Phase 1).
-
----
-
-### P-SEC-2: Logging Infrastructure Accidentally Captures Prompts
-
-**What goes wrong:** Structured logging libraries that serialize entire objects will capture `messages` array content when the request body is logged at DEBUG level. Even when `Authorization` headers are excluded, the prompt content itself is sensitive. Template string interpolation like `` logger.debug(`Request: ${JSON.stringify(body)}`) `` will capture full prompts.
+### AUDIO-CRIT-2: Bun FormData Binary Truncation at Null Bytes (Files ≤ 8 Bytes)
+
+**What goes wrong:** Confirmed Bun bug (issue #26740). Bun's multipart parser stores field values in a
+`Semver.String` type that uses null-byte scanning for length on inline strings ≤ 8 bytes. Any binary
+file whose content includes a `0x00` byte within the first 8 bytes will be silently truncated at that
+byte. Audio file headers that can trigger this include gzip-compressed audio and RIFF/WAV headers
+(which contain null bytes in the chunk size fields).
+
+In practice, real audio files are much larger than 8 bytes, but this can surface in automated tests
+that use small synthetic audio fixtures or when someone uploads a nearly-empty test file.
 
 **Prevention:**
-1. Log only the fields enumerated in spec section 19: `requestId`, `provider`, `model`, `latency`, `status`, `failoverReason`, `tokenUsage`, `quotaHeaders`. No payload fields.
-2. Use a structured logger that accepts named fields (not `JSON.stringify(body)`). Pass fields individually.
-3. Add an explicit test that asserts the log output for a known request does not contain the `content` field from any message.
+- Use audio test fixtures that are at least 32 bytes. Never use ≤ 8 byte binary fixtures.
+- After reading the `file` field from FormData, assert `blob.size > 0` before writing to disk. Return
+  a 400 with `"Audio file is empty or unreadable"` if the assertion fails.
+- In CI, test with a real minimal WAV file (44-byte header + silent PCM) rather than a constructed
+  byte string.
 
-**Warning signs:** Logs containing message content strings; prompt text visible in console output.
+**Detection:** Whisper subprocess exits with "failed to open audio file" on a file that the proxy
+wrote with zero or truncated bytes.
 
-**Phase:** Logger implementation (Phase 1); test coverage (Phase 3).
+**Phase:** Multipart parsing validation.
 
 ---
 
-### P-SEC-3: Non-Constant-Time Key Comparison Enables Timing Attacks
+### AUDIO-CRIT-3: Whisper Subprocess PATH Resolution Fails in Bun Compiled Binaries and Clean Environments
 
-**What goes wrong:** Simple string comparison (`inputKey === PERSONAL_PROXY_API_KEY`) returns early on the first differing byte. A network-local attacker can measure response time to enumerate the correct key character by character. This is especially relevant for single-character prefix attacks.
+**What goes wrong:** Bun has a confirmed bug (issue #10865) where `Bun.spawn` and the Bun Shell PATH
+lookup fails in compiled binaries on macOS. Even in non-compiled mode, `Bun.spawn` uses `process.env`
+as captured at startup — if `whisper` or `whisper-cpp` is installed in a path that was added to PATH
+*after* Bun started (e.g., via `/opt/homebrew/bin` in some shell profiles), it will not be found.
 
-**Prevention:** Use `crypto.timingSafeEqual` (available in Bun via Node.js crypto compatibility):
-```typescript
-import { timingSafeEqual } from "node:crypto";
+`Bun.spawn(["whisper", ...])` will throw `ENOENT` or `spawn whisper ENOENT` with no meaningful error
+message distinguishing "binary not found" from "binary crashed immediately."
 
-function isValidKey(input: string, expected: string): boolean {
-  const a = Buffer.from(input.padEnd(expected.length));
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
+**Prevention:**
+- Use `Bun.which("whisper")` (or `Bun.which("whisper-cpp")`) at startup and fail fast with a clear
+  error if the binary is not found. This check runs during server initialization, not per-request.
+- Make the whisper binary path configurable via an env var (`WHISPER_BIN_PATH`). Default to `Bun.which("whisper") ?? "whisper"` but log a warning at startup if `which` returns null.
+- Always resolve to an absolute path before passing to `Bun.spawn`.
+- In Docker, install whisper.cpp to an absolute, known path and set `WHISPER_BIN_PATH` explicitly.
+
+**Detection:** `ENOENT` errors in spawn call; "whisper binary not found" startup warning.
+
+**Phase:** Startup config validation (`/ready` endpoint should report `whisper_available: false` if
+binary is missing).
+
+---
+
+### AUDIO-CRIT-4: Model File Paths with Spaces or Non-ASCII Characters Break Whisper CLI
+
+**What goes wrong:** whisper.cpp's CLI and multiple Python whisper implementations have confirmed bugs
+when the model file path or the input audio file path contains spaces or non-ASCII (including Chinese,
+Japanese, emoji, etc.) characters. The path is passed as a command-line argument and if not properly
+quoted, the C runtime will split on whitespace. Even with shell quoting, whisper.cpp's internal path
+handling in older versions truncates at the first space (confirmed: issue #1038 "Model download fails
+if the destination folder includes a space").
+
+This affects:
+- `--model /Users/juan my files/whisper/ggml-base.bin` → whisper reads `/Users/juan` and fails
+- Temp audio files written to `/var/folders/abc/T/audio 123.wav` → path split on space
+- Model paths with accented characters on Windows deployments
+
+**Prevention:**
+- Always write temp audio files to a path with no spaces: use `crypto.randomUUID()` as the filename
+  stem (e.g., `/tmp/audio-<uuid>.wav`) — UUIDs contain only hex and hyphens.
+- Validate the configured model path at startup: if it contains spaces, either reject with a clear
+  error or double-quote it in the spawn argument array *and* test that whisper.cpp version handles it.
+- Use `Bun.spawn(["whisper-cpp", "--model", modelPath, "--file", audioPath, ...])` with separate
+  array entries (not a shell string) — this bypasses shell word splitting. Never construct a shell
+  string like `"whisper --model " + modelPath` and pass it to `Bun.Shell`.
+
+**Detection:** whisper exits with non-zero code and stderr "failed to open model file"; no
+transcription output even for valid audio.
+
+**Phase:** Subprocess invocation layer.
+
+---
+
+### AUDIO-CRIT-5: Temp File Leaks When Whisper Process Is Killed or Handler Throws
+
+**What goes wrong:** The standard pattern is: write audio to `/tmp/<uuid>.wav`, spawn whisper, read
+output, delete temp file. If the Bun process receives SIGTERM mid-transcription, or if the fetch
+handler throws an unhandled exception between file write and file delete, the temp file is never
+cleaned up. On a busy server, thousands of temp files accumulate until disk space runs out, eventually
+killing the process.
+
+This is compounded by Bun's file descriptor inheritance behavior: POSIX defaults FDs to be inherited
+by child processes. If the temp file FD is open in the parent when the child spawns, the child holds
+a reference and the file cannot be GC'd even if the parent unlinks it (on Linux, the file data
+remains until the child exits; on macOS the file is deleted but disk blocks are retained until FD
+closure).
+
+**Prevention:**
+- Use `try { ... } finally { await Bun.file(tmpPath).unlink?.() ?? unlinkSync(tmpPath) }` around the
+  full transcription block. `finally` runs even on throw.
+- Register a `process.on("exit", ...)` and `process.on("SIGTERM", ...)` handler at startup that
+  tracks and deletes all in-flight temp files from a `Set<string>`.
+- Write temp files to a dedicated subdirectory (e.g., `/tmp/bun-audio-proxy/`) and sweep it on
+  startup to clean up files left by a previous crash.
+- Set `Bun.spawn({ ... })` with `stdio: ["ignore", "pipe", "pipe"]` to avoid inheriting the parent's
+  FDs unnecessarily.
+
+**Detection:** Growing `/tmp` directory; disk-full errors under load.
+
+**Phase:** Transcription service implementation and process lifecycle.
+
+---
+
+### AUDIO-CRIT-6: Whisper Subprocess stderr vs stdout Confusion Corrupts JSON Output
+
+**What goes wrong:** When whisper.cpp is invoked with `--output-json` or `--output-txt`, the
+transcription result goes to a *file* (not stdout) by default. The subprocess's stdout emits only
+progress/timing lines like:
 ```
-Note: padding to equal length is required; `timingSafeEqual` throws if lengths differ.
+whisper_model_load: loading model from '/path/to/ggml-base.bin'
+whisper_model_load: n_vocab = 51864
+```
+and its stderr emits per-segment timestamps.
 
-**Warning signs:** Auth check using `===` or `.startsWith()`.
+A naive implementation that reads `stdout` for the transcription text will receive only model-loading
+progress lines, not the actual transcript. The actual output goes to `<inputfile>.txt` or
+`<inputfile>.json` on disk.
 
-**Phase:** Auth middleware (Phase 1).
+Alternatively, if `--output-txt -` (dash for stdout) is supported in the installed version, mixing
+progress noise with transcript text on stdout produces unparseable output.
+
+**Prevention:**
+- Use `--output-json` with an explicit output file path: `--output-json --output-file <tmpBasePath>`.
+  Whisper writes `<tmpBasePath>.json`. Read this file after the process exits.
+- Capture stderr separately (`stderr: "pipe"`) and log it at DEBUG level — never mix it into stdout.
+- After process exit, assert exit code is 0 before attempting to read the output file.
+- Treat any non-zero exit code as a transcription failure and return a 500.
+
+**Detection:** Transcription returning model load logs as text; empty JSON parse errors on whisper
+output.
+
+**Phase:** Subprocess invocation and output handling.
 
 ---
 
-### P-SEC-4: X-LLM-Provider Header Enables Provider Fingerprinting
+### AUDIO-CRIT-7: No Request Timeout Set — Long Audio Blocks the Handler Indefinitely
 
-**What goes wrong:** When `EXPOSE_PROVIDER_HEADER=true`, the response includes `X-LLM-Provider: cerebras` or `X-LLM-Provider: groq`. This tells attackers which upstream provider processed the request, enabling targeted rate-limit exhaustion attacks (spam the proxy when you know Cerebras is handling it to drain Cerebras quota while Groq remains available).
+**What goes wrong:** Bun.serve has a default `idleTimeout` of 10 seconds — but for the *transcription
+handler* this is the wrong concern. The handler actively sends no bytes while whisper is running (it's
+waiting for the subprocess), so the connection is considered "active" and the idle timeout does not
+fire. However, whisper on CPU for a 60-minute audio file can take 10–30 minutes. If the downstream
+client has a 30-second timeout (the OpenAI SDK default), the client gives up and closes the
+connection, but the whisper subprocess continues running on the server, consuming CPU and holding the
+temp file.
 
-**Prevention:** Default is `EXPOSE_PROVIDER_HEADER=false`. Do not enable in production environments where the proxy is exposed to untrusted networks. Document this risk in comments.
+The existing proxy already uses `server.timeout(request, 0)` for SSE streams. The transcription
+endpoint needs the same treatment — but additionally it needs an *application-level* timeout on the
+whisper subprocess itself, because `server.timeout(request, 0)` prevents Bun from closing the
+connection but does nothing to kill the subprocess if the client disconnects.
 
-**Warning signs:** `EXPOSE_PROVIDER_HEADER=true` in production env files.
+**Prevention:**
+- Call `server.timeout(request, 0)` at the top of the transcription handler (same pattern as SSE).
+- Set an application-level timeout on the Bun.spawn process:
+  ```typescript
+  const timeout = setTimeout(() => { proc.kill(); }, REQUEST_TIMEOUT_MS);
+  await proc.exited;
+  clearTimeout(timeout);
+  ```
+- Listen to `request.signal.addEventListener("abort", () => proc.kill())` to kill the subprocess when
+  the client disconnects.
+- Return a 504 with OpenAI-style error body if the subprocess is killed by timeout.
 
-**Phase:** Response normalization (Phase 2); environment config documentation.
+**Detection:** whisper processes visible in `ps aux` long after client disconnected; server CPU pegged
+at 100% with no active connections.
+
+**Phase:** Subprocess lifecycle management.
 
 ---
 
-### P-SEC-5: Internal Status Endpoint Leaking rateLimitSnapshot Values
+### AUDIO-CRIT-8: Bun `maxRequestBodySize` Default Is 128 MiB — Conflicts with Proxy's `MAX_REQUEST_BODY_BYTES`
 
-**What goes wrong:** The `GET /internal/providers/status` response includes `rateLimitSnapshot` with remaining quota values. These are not secrets themselves, but they reveal capacity information that makes quota exhaustion attacks more precise. More critically, if the endpoint is accidentally left unprotected (middleware ordering bug), it exposes provider health state to unauthenticated clients.
+**What goes wrong:** The existing proxy config sets `MAX_REQUEST_BODY_BYTES=1048576` (1 MiB) as the
+request body limit, enforced in the Bun.serve configuration. Audio files routinely exceed 1 MiB — a
+60-second MP3 is typically 1–4 MiB; a 10-minute WAV is 100+ MiB.
 
-**Prevention:** The auth middleware must apply to `/internal/*` routes explicitly. Do not assume route ordering provides security. Test that `GET /internal/providers/status` without credentials returns 401.
+If `maxRequestBodySize` stays at 1 MiB, Bun will return a bare 413 status with no body — not an
+OpenAI-style error — before the fetch handler is even called. The existing `openaiError()` helper
+never runs.
 
-**Warning signs:** Status endpoint accessible without `Authorization` header; rate-limit remaining counts visible to unauthenticated probes.
+**Prevention:**
+- Add a separate `AUDIO_MAX_FILE_BYTES` env var (default: 26214400 = 25 MiB, matching OpenAI's
+  Whisper API limit).
+- Set `maxRequestBodySize` on `Bun.serve` to `AUDIO_MAX_FILE_BYTES` when the transcription route is
+  enabled — this overrides the global limit.
+- Inside the handler, read `blob.size` after formData parsing and return a proper OpenAI 413 error if
+  it exceeds `AUDIO_MAX_FILE_BYTES`.
+- Document that enabling the audio route changes the server-wide body limit and could allow large
+  bodies on other routes too (or implement route-level enforcement in the handler).
 
-**Phase:** Auth middleware route coverage (Phase 1).
+**Detection:** curl returning bare `413` with empty body when uploading audio > 1 MiB; no log entry
+from the fetch handler.
+
+**Phase:** Server configuration and route registration.
+
+---
+
+## Common Mistakes (easy to miss)
+
+### AUDIO-COMMON-1: Audio Format Mismatch — Client Sends Formats Whisper Cannot Read Directly
+
+**What goes wrong:** The OpenAI Whisper API accepts mp3, mp4, mpeg, mpga, m4a, wav, and webm. Local
+whisper.cpp does not natively read all of these — it requires input as WAV (PCM, 16kHz, mono, 16-bit)
+for most CLI invocations. Without `ffmpeg` pre-conversion, passing an MP3 file directly to
+whisper.cpp either produces garbage output, a cryptic "failed to read WAV file" error, or (with some
+builds) silently reads only the first few seconds.
+
+The openai-python and openai-node SDKs pass whatever file the user provides — they do not pre-convert
+for you.
+
+**Prevention:**
+- Always convert incoming audio to WAV 16kHz mono before passing to whisper. Shell out to `ffmpeg`:
+  ```bash
+  ffmpeg -i input.<ext> -ac 1 -ar 16000 -f wav output.wav -y -loglevel error
+  ```
+- Validate `ffmpeg` availability at startup alongside the whisper binary check.
+- Accept the OpenAI-documented formats at the proxy level (`mp3|mp4|mpeg|mpga|m4a|wav|webm`) and
+  reject any other MIME type with a 400 before converting.
+- Keep both the raw upload temp file and the converted WAV as separate paths; delete both in
+  `finally`.
+
+**Detection:** whisper exits 0 but returns empty transcript; stderr says "failed to read audio."
+
+**Phase:** Audio preprocessing step.
+
+---
+
+### AUDIO-COMMON-2: Whisper Hallucination on Silent or Near-Silent Audio
+
+**What goes wrong:** Whisper (all versions) is well-documented to hallucinate text on silent audio
+segments. On completely silent audio, Whisper-large-v3 transcribes filler phrases like "so" in 55% of
+cases. On long files with silence between speech segments, hallucinations appear at 1% overall but
+with harmful content in 38% of those hallucinations. A proxy that passes hallucinated output
+downstream as legitimate transcription has no signal that anything went wrong — the exit code is 0 and
+the output file is valid JSON.
+
+**Prevention:**
+- This is a fundamental Whisper limitation, not a bug to fix in the proxy. Document it clearly.
+- Optionally expose `no_speech_prob` from verbose JSON output to downstream clients who request
+  `response_format=verbose_json`, so they can filter low-confidence results.
+- Do not attempt to validate transcription quality in the proxy — that responsibility belongs to the
+  caller.
+
+**Detection:** Clients reporting spurious transcription text on empty recordings.
+
+**Phase:** API contract documentation; verbose_json passthrough.
+
+---
+
+### AUDIO-COMMON-3: Model Cold-Start Latency on First Request
+
+**What goes wrong:** When whisper is invoked as a subprocess (CLI), it loads the model from disk on
+every request. For `ggml-base.bin` (~150 MB), this adds 2–5 seconds of model load time before
+inference begins. For `ggml-large-v3.bin` (~3 GB), cold load can take 30+ seconds on slow storage.
+On the first request after server startup, clients experience this delay with no progress indication.
+
+Unlike a persistent Python server that holds the model in memory, a subprocess-per-request pattern
+pays the cold-start cost on every single request.
+
+**Prevention:**
+- Choose a model size appropriate for the hardware and acceptable latency. `ggml-base` or `ggml-small`
+  are the practical options for a personal proxy with CPU-only inference.
+- Consider running `whisper.cpp --server` mode as a persistent sidecar process and calling its HTTP
+  API instead of spawning a new process per request. This keeps the model warm and serializes requests
+  through its internal queue.
+- Log model load time (from spawn to first output) separately from inference time to give visibility.
+- Document in `/ready` response whether the whisper binary and model file are both accessible, so
+  callers know startup is complete before sending requests.
+
+**Detection:** First request takes 10x longer than subsequent requests; logs show no whisper activity
+until model is fully loaded.
+
+**Phase:** Architecture decision (sidecar vs subprocess) must be made before implementation.
+
+---
+
+### AUDIO-COMMON-4: Concurrency — Simultaneous Whisper Subprocesses Saturate CPU
+
+**What goes wrong:** Bun's event loop is single-threaded and non-blocking — it handles concurrent
+HTTP requests naturally. But whisper inference is CPU-bound and runs in the subprocess. If two audio
+transcription requests arrive simultaneously, two whisper subprocesses spawn concurrently. Each uses
+all available CPU cores (whisper.cpp uses OpenMP threading by default). Two concurrent large-model
+inferences on a 4-core machine will: (a) take 4–8x longer each due to CPU contention, (b) spike
+memory to 2x model size, (c) potentially cause OOM kills.
+
+The existing chat proxy is not affected by this — upstream inference is remote. Adding local whisper
+introduces the first CPU-bound shared resource.
+
+**Prevention:**
+- Implement a serial request queue for whisper invocations: only one subprocess at a time, all others
+  wait. A simple semaphore with a module-level `let transcriptionInProgress = false` and a queue of
+  pending callbacks is sufficient for a personal proxy.
+- Set a maximum queue depth (e.g., 3) and return 503 "Transcription service busy" to requests beyond
+  that depth.
+- Log queue depth and wait time so the bottleneck is visible.
+- Alternatively, use `whisper.cpp --server` which handles its own task queue internally.
+
+**Detection:** CPU at 100% with concurrent uploads; whisper subprocesses visible in `ps` with both
+consuming CPU simultaneously; dramatically increased latency under concurrent load.
+
+**Phase:** Concurrency control, implemented before or alongside the transcription handler.
+
+---
+
+### AUDIO-COMMON-5: `response_format` Values Have Different Content-Type Requirements
+
+**What goes wrong:** The OpenAI transcription API returns different `Content-Type` headers depending
+on `response_format`:
+
+| `response_format` | Expected `Content-Type` |
+|---|---|
+| `json` (default) | `application/json` |
+| `text` | `text/plain` |
+| `verbose_json` | `application/json` |
+| `srt` | `text/plain` |
+| `vtt` | `text/plain` |
+
+The openai-python SDK inspects the `Content-Type` response header to decide how to parse the body. If
+the proxy returns `text/plain` for `response_format=text` but the proxy always sets
+`Content-Type: application/json`, the SDK will try to JSON-parse the plain text and throw a parse
+error. Conversely, returning `application/json` when the format is `text` breaks plain-text clients.
+
+**Prevention:**
+- Map `response_format` to `Content-Type` explicitly in the route handler.
+- Default to `application/json` for `json` and `verbose_json`; use `text/plain` for `text`, `srt`,
+  and `vtt`.
+- Return the whisper output in the correct format: for `json`, wrap the text in
+  `{"text": "..."}` exactly matching OpenAI's schema. For `verbose_json`, include `task`, `language`,
+  `duration`, and `segments`.
+
+**Detection:** openai-python SDK throwing `json.JSONDecodeError` when `response_format="text"`;
+text clients receiving JSON envelope they didn't ask for.
+
+**Phase:** Route handler and response serialization.
+
+---
+
+### AUDIO-COMMON-6: OpenAI-Node SDK Sends `filename` in Content-Disposition — Proxy Must Not Discard It
+
+**What goes wrong:** The openai-node SDK constructs the multipart body with a `Content-Disposition`
+header that includes `filename="audio.mp3"` (or whatever the user provided). Some OpenAI-compatible
+implementations use this filename to infer the audio format when no explicit `MIME type` is in the
+part's `Content-Type`. If the proxy discards the filename and only stores the raw bytes, whisper
+cannot infer the original format for pre-conversion.
+
+The openai-python SDK, by contrast, sends both `filename` and a `Content-Type` like `audio/mpeg` in
+the part headers. openai-node may omit the `Content-Type` on the file part in some versions, sending
+only the filename.
+
+**Prevention:**
+- Always use `ffmpeg` for conversion regardless of extension — do not trust filename extension for
+  format detection. Pass the raw bytes to ffmpeg with `-i` and let ffmpeg probe the format.
+- If you need the original filename for logging, extract it from the FormData file blob's `name`
+  property: `const file = formData.get("file") as File; file.name`.
+- Test with both the openai-python and openai-node SDKs; they construct multipart differently.
+
+**Detection:** "format not recognized" or incorrect audio parsing when using openai-node vs
+openai-python.
+
+**Phase:** Multipart parsing and audio preprocessing.
+
+---
+
+### AUDIO-COMMON-7: Whisper Model File Validation at Runtime, Not Startup
+
+**What goes wrong:** The whisper model file may exist at startup but become unavailable later (NFS
+mount unmounted, file deleted by another process, permissions changed). More commonly, the model path
+is configured but the file was never downloaded — the env var is set but points to a nonexistent path.
+
+If the model file is only checked when a request arrives, the first transcription request fails after
+a multi-second whisper invocation attempt, rather than failing fast at server start.
+
+**Prevention:**
+- At startup, call `Bun.file(modelPath).exists()` (or `await Bun.file(modelPath).size()`) and refuse
+  to start (or mark whisper as unavailable in `/ready`) if the model file is missing.
+- Include `whisper_model_available: true/false` in the `/ready` response body.
+- The `WHISPER_MODEL_PATH` env var should be required if the transcription route is enabled; fail with
+  a clear message if it is unset.
+
+**Detection:** First transcription request returning "file not found" after several seconds; `/ready`
+not reflecting whisper unavailability.
+
+**Phase:** Startup validation and `/ready` endpoint.
+
+---
+
+## Bun-Specific Issues
+
+### AUDIO-BUN-1: `Bun.spawn` Inherits All Parent File Descriptors by Default
+
+**What goes wrong:** On POSIX, child processes inherit open FDs from the parent. Bun mitigates this
+on modern Linux with `close_range` but not on macOS. A temp audio file opened via `Bun.write()` is
+held open by the parent; when the whisper subprocess spawns, it inherits this FD. If the parent then
+tries to `unlink` the file while the child still has it open, the file is removed from the directory
+but the data remains on disk until whisper exits. This is usually fine on Linux (unlink + FD = data
+freed on last close) but can cause confusion on macOS where the behavior differs.
+
+More importantly: if the server holds an open FD to a temp file that was "deleted," and whisper fails
+to read it from the path (because it's already unlinked), whisper reports a file-not-found error even
+though the data is still accessible via FD.
+
+**Prevention:**
+- Write temp audio via `await Bun.write(tmpPath, blob)` and do not keep the returned file handle
+  open. The `Bun.write` call closes the FD when complete.
+- Only unlink the temp file *after* the whisper process has fully exited (`await proc.exited`).
+- Use `Bun.spawn({ stdin: "ignore", stdout: "pipe", stderr: "pipe" })` to explicitly control which
+  FDs the child inherits.
+
+**Phase:** Subprocess invocation.
+
+---
+
+### AUDIO-BUN-2: `Bun.serve` idleTimeout Fires During Long Transcription If No Bytes Are Sent
+
+**What goes wrong:** The transcription endpoint does not stream — it waits for whisper to complete and
+returns the full result. During this wait (which can be 30+ seconds for long audio on CPU), Bun
+considers the connection idle (no bytes flowing). The default `idleTimeout` (which was 10 seconds in
+Bun v1.1.26 and has been intermittently changed in subsequent versions) may close the connection
+before whisper finishes.
+
+The existing proxy already calls `server.timeout(request, 0)` for SSE streams. The transcription
+endpoint must do the same even though it is not a stream.
+
+**Prevention:**
+- Call `server.timeout(request, 0)` immediately at the start of the transcription handler, before
+  awaiting anything.
+- This is a one-line addition to the route handler that costs nothing.
+
+**Phase:** Route handler setup.
+
+---
+
+### AUDIO-BUN-3: TypeScript `FormDataEntryValue` Is `string | File` — `File` Is Not `Blob` in Bun Types
+
+**What goes wrong:** In Bun's TypeScript types, `FormDataEntryValue` is `string | File`. The `File`
+type in server-side Bun is a subset of the browser `File` interface — it has `.name`, `.size`,
+`.type`, and `.arrayBuffer()` but it may not have all `Blob` methods depending on the Bun version and
+how types are resolved. Code that casts `formData.get("file") as Blob` and calls Blob-only methods
+may fail at runtime even if TypeScript does not catch it.
+
+More practically: calling `.arrayBuffer()` to get audio bytes works correctly, but calling
+`new Blob([file])` to re-wrap may produce double-boxing issues.
+
+**Prevention:**
+- Use `formData.get("file")` typed as `File | null`, not `Blob`.
+- To write to disk: `await Bun.write(tmpPath, file)` — Bun.write accepts `File` directly without
+  needing to cast to Blob.
+- To get bytes: `await file.arrayBuffer()` — this is on both `File` and `Blob`.
+- Add `if (!(file instanceof File)) return openaiError("file field must be an audio file", ...)` to
+  guard against the field being a string.
+
+**Phase:** Multipart parsing and type handling.
+
+---
+
+### AUDIO-BUN-4: `Bun.spawn` stdout Buffer Overflow for Long Transcriptions
+
+**What goes wrong:** If whisper's stdout is captured with `stdout: "pipe"` and the subprocess writes
+a very large amount of text (e.g., transcribing a 2-hour lecture), the pipe buffer fills up. If the
+parent does not read from the pipe while the process runs, the subprocess blocks waiting for the
+parent to drain the buffer, and the parent blocks waiting for the subprocess to exit. Classic
+deadlock.
+
+**Prevention:**
+- If reading stdout via pipe, consume it incrementally: `for await (const chunk of proc.stdout) {
+  buffer += chunk; }`.
+- Alternatively, use the output-file approach (AUDIO-CRIT-6): whisper writes to a file, not stdout.
+  This eliminates the buffer concern entirely and is the recommended approach.
+- If stdout must be piped, use `Bun.readableStreamToText(proc.stdout)` which reads fully to a string
+  — but this still requires whisper stdout to be the transcript, not progress noise.
+
+**Phase:** Subprocess output handling.
+
+---
+
+## Integration Pitfalls
+
+### AUDIO-INTEG-1: Whisper CPU Inference Degrades Chat Completions Latency
+
+**What goes wrong:** The existing chat proxy routes requests to remote providers (Cerebras, Groq) with
+latency dominated by network I/O. Adding local whisper introduces CPU-bound work on the same process.
+Bun's event loop is single-threaded; even though `Bun.spawn` is async (the subprocess runs in a
+separate process), the CPU *on the machine* is shared. If whisper saturates all cores during
+inference, the Bun event loop's async I/O operations (forwarding chat request/response chunks to
+upstream providers) are not blocked — but system scheduler jitter can add latency to in-flight HTTP
+responses.
+
+On a single-core VPS or a resource-constrained Docker container, this is especially pronounced.
+
+**Prevention:**
+- Run whisper with a CPU thread limit if the model supports it: `--threads 2` for whisper.cpp limits
+  OpenMP threads, leaving cores available for Bun's I/O.
+- On production hosts with resource constraints, add documentation warning that whisper transcription
+  may transiently increase chat completion latency.
+- Consider a `WHISPER_MAX_THREADS` env var that defaults to `Math.max(1, os.cpus().length - 1)`.
+- Log whisper inference duration so the correlation with chat latency spikes is diagnosable.
+
+**Phase:** Subprocess configuration and monitoring.
+
+---
+
+### AUDIO-INTEG-2: Auth Middleware Must Cover `/v1/audio/transcriptions` — Not Assumed from Route Order
+
+**What goes wrong:** The existing auth gate in `index.ts` is structured as an early-return pattern:
+all routes below the auth check are protected. Adding a new route must be placed *after* the auth
+check, not before it. A common mistake when adding a new route is to insert it near the top (for
+clarity) without realizing it bypasses the auth guard.
+
+The transcription endpoint must require the same `Authorization: Bearer PERSONAL_PROXY_API_KEY` as
+all other endpoints.
+
+**Prevention:**
+- Review `index.ts` route ordering after adding the new route; write a test that calls
+  `/v1/audio/transcriptions` without an `Authorization` header and asserts 401.
+- Consider extracting the auth check into a reusable function or middleware object to make it
+  impossible to forget.
+
+**Detection:** Unauthenticated POST to `/v1/audio/transcriptions` returning a response other than 401.
+
+**Phase:** Route registration (first thing to verify after adding the handler).
+
+---
+
+### AUDIO-INTEG-3: `/ready` Endpoint Must Report Whisper Availability Separately from Provider Availability
+
+**What goes wrong:** The existing `/ready` implementation checks for at least one eligible upstream
+provider and a configured proxy key. Adding whisper transcription creates a second independently
+optional capability. A caller may need to know "is transcription available?" separately from "are
+chat completions available?" If whisper is down (model missing, binary not found), chat completions
+should still work.
+
+**Prevention:**
+- Add a `whisperAvailable: boolean` field to the `/ready` response.
+- The `ready: true` condition should remain "at least one chat provider available AND proxy key
+  configured" — whisper unavailability should produce a degraded mode, not a failed readiness check.
+- Example response:
+  ```json
+  { "ready": true, "mode": "degraded", "eligibleProviders": ["cerebras"],
+    "unavailableProviders": ["groq"], "whisperAvailable": false }
+  ```
+
+**Phase:** `/ready` endpoint update.
+
+---
+
+### AUDIO-INTEG-4: OpenAI-Style Error Shape Differs Between Chat and Audio Endpoints
+
+**What goes wrong:** The existing proxy returns `{ "error": { "message": "...", "type": "...",
+"code": "...", "param": null } }` for all errors. The OpenAI transcription API returns the same error
+shape for most errors — but some SDKs (particularly openai-python) have special handling for
+transcription-specific error codes.
+
+More importantly: the transcription endpoint must return `application/json` for error responses even
+when `response_format=text` was requested. A client requesting plain text output still expects JSON
+error bodies.
+
+**Prevention:**
+- Always use the existing `openaiError()` helper for all error paths in the transcription handler,
+  regardless of `response_format`.
+- Test error paths (400, 401, 413, 500, 503) with the openai-python SDK and verify it raises
+  `openai.BadRequestError`, not a JSON parse error.
+
+**Phase:** Route handler error handling.
+
+---
+
+### AUDIO-INTEG-5: `createServer` Factory Receives `adapters` Parameter — Transcription Handler Is Not Adapter-Based
+
+**What goes wrong:** The existing `createServer(adapters, port)` factory in `index.ts` takes a
+`Record<Provider, ProviderAdapter>` parameter and uses dependency injection for testability. The
+whisper transcription service does not fit this adapter pattern — it is a subprocess-based local
+service, not a remote provider.
+
+Adding whisper by simply calling `Bun.spawn` inline in the route handler makes the transcription
+route untestable without a real whisper binary. The test suite (which already uses mock adapters for
+Cerebras and Groq) has no equivalent injection point for whisper.
+
+**Prevention:**
+- Extract a `TranscriptionService` interface with `transcribe(audioPath: string, options: ...): Promise<TranscriptionResult>` signature.
+- Inject it alongside adapters: `createServer(adapters, transcriptionService, port)`.
+- The real implementation calls whisper; tests inject a mock that returns fixture data.
+- This mirrors the existing adapter injection pattern exactly.
+
+**Phase:** Architecture decision — define this interface before writing the transcription handler.
 
 ---
 
 ## Testing Pitfalls
 
-### P-TEST-1: Provider State Is Global Mutable — Tests Pollute Each Other
+### AUDIO-TEST-1: Cannot Mock `Bun.spawn` Easily — Tests Require Filesystem Fixtures
 
-**What goes wrong:** The round-robin router and cooldown state are in-memory module-level variables. In `bun test`, all test files in a run share the same module instances unless `--isolate` is used. A test that triggers a 429 and sets a cooldown will affect subsequent tests that expect both providers to be eligible. This is especially insidious because test order is non-deterministic by default.
-
-**Prevention:**
-1. Encapsulate all provider state in a class with a `reset()` method.
-2. Call `router.reset()` in `beforeEach` or `afterEach` in every test file that exercises routing.
-3. Alternatively, run `bun test --isolate` to give each test file a fresh module context (slower but eliminates cross-file pollution).
-
-**Warning signs:** Tests passing individually but failing when run together; cooldown tests affecting routing tests.
-
-**Phase:** Test infrastructure setup (Phase 3).
-
----
-
-### P-TEST-2: Streaming Cannot Be Tested With Standard Response Assertion
-
-**What goes wrong:** Asserting `const body = await response.text()` on a streaming response waits for the full stream to complete before returning. This correctly captures all output but does not verify incremental delivery (i.e., that chunks were sent progressively and not buffered). A response that buffers everything and sends it all at once would pass a `response.text()` assertion.
-
-More critically, unit-testing the stream relay with a mock SDK that returns an `AsyncIterable` requires the test to `for await` over the response body — which requires converting the Response body back to an async iterator, a non-obvious pattern in Bun.
+**What goes wrong:** Bun's `mock.module()` can mock `Bun.spawn` but doing so globally is fragile and
+interferes with other tests. The transcription handler calls `Bun.spawn` directly, making unit
+testing require either (a) a real whisper binary on the CI machine, or (b) a real `ffmpeg` binary.
+Most CI environments do not have whisper.cpp installed.
 
 **Prevention:**
-1. For unit tests, test the stream relay function directly by passing a mock `AsyncIterable<SDKChunk>` and collecting yielded values into an array.
-2. For integration tests, assert chunk order and `data: [DONE]` termination by consuming the stream iteratively.
-3. Do not rely solely on `response.text()` for streaming correctness.
+- Use the `TranscriptionService` injection pattern (AUDIO-INTEG-5). Tests inject a mock
+  `TranscriptionService` that does not call `Bun.spawn` at all.
+- For integration tests that must exercise the subprocess, gate them with an env var
+  (`INTEGRATION_WHISPER=true`) and skip them in CI unless the binary is available.
+- Use `Bun.which("whisper")` in the test setup to skip whisper tests automatically if the binary is
+  not found: `test.skipIf(!Bun.which("whisper"))("transcribes audio", ...)`.
 
-**Warning signs:** All streaming tests pass but end-to-end behavior produces buffered responses; missing `data: [DONE]` not caught by tests.
-
-**Phase:** Test design (Phase 3).
-
----
-
-### P-TEST-3: Groq SDK Internal Retries Obscure 429 Test Timing
-
-**What goes wrong:** If `maxRetries: 0` is not set on the Groq client in test environments, a mock returning 429 will be retried twice internally before the error reaches the adapter. Test assertions about "provider entered cooldown after 429" will time out waiting for the SDK to exhaust its retries, or the cooldown will be applied with a multi-second delay.
-
-**Prevention:** Ensure the test setup initializes SDK clients with `maxRetries: 0` (same as production). If using mock SDK clients, mock the full `APIError` response directly rather than mocking at the HTTP layer.
-
-**Warning signs:** 429 handling tests running for 30+ seconds; intermittent test failures when SDK retry timing varies.
-
-**Phase:** Test infrastructure / adapter setup (Phase 3).
+**Phase:** Test infrastructure design.
 
 ---
 
-### P-TEST-4: Bun Module Mocking Is Not Automatically Cleaned Up
+### AUDIO-TEST-2: Temp File Cleanup Not Verified — Tests Leave Orphan Files
 
-**What goes wrong:** `mock.module()` in Bun patches modules in-place and does not automatically restore them between test files. A test file that mocks `./providers/groq-adapter` will affect other test files unless `mock.restore()` is called explicitly. Unlike Jest, there is no auto-restore option.
+**What goes wrong:** If the transcription handler has a bug that causes temp file leaks (e.g., the
+`finally` block is missing), unit tests will not catch it because they use mock transcription
+services. The leak only appears in integration or production.
 
-**Prevention:** Use `afterEach(() => { mock.restore(); })` in every test file that calls `mock.module()`. For provider adapter tests, create fresh adapter instances with injected mock SDK clients rather than patching modules.
+**Prevention:**
+- In integration tests that exercise the real subprocess path, assert that no temp files exist in the
+  temp directory after the request completes:
+  ```typescript
+  const files = readdirSync("/tmp").filter(f => f.startsWith("audio-"));
+  expect(files.length).toBe(0);
+  ```
+- Run this assertion even when the transcription fails (test error paths too).
 
-**Warning signs:** Tests that pass in isolation but fail when run as a suite; unexpected mock implementations active in unrelated tests.
+**Phase:** Integration test design.
 
-**Phase:** Test infrastructure (Phase 3).
+---
+
+### AUDIO-TEST-3: Multipart FormData Test Construction Is Brittle in Bun
+
+**What goes wrong:** Constructing multipart requests in `bun test` to exercise the `formData()`
+parsing path requires building a valid `Request` with a `FormData` body. The boundary Bun generates
+may be non-standard (AUDIO-CRIT-1: one leading dash instead of two). Test code that manually
+constructs `Content-Type: multipart/form-data; boundary=----test` and builds the body string must
+match Bun's expected format exactly, or `formData()` will throw a parse error during the test — not
+because of a bug in the handler, but because the test fixture is malformed.
+
+**Prevention:**
+- Build test request bodies by constructing a native `FormData` object and passing it to `new
+  Request(url, { method: "POST", body: formData })`. Let Bun generate the boundary automatically.
+- Do not hand-construct multipart body strings for unit tests.
+- Use the real openai-node or openai-python SDK in integration tests — their multipart encoding is
+  well-tested against the real OpenAI API and should work with a compliant proxy.
+
+**Phase:** Test fixture construction.
+
+---
+
+### AUDIO-TEST-4: Concurrency Queue Behavior Hard to Test Deterministically
+
+**What goes wrong:** The serial whisper queue (AUDIO-COMMON-4) requires concurrent requests to test
+correctly. Testing that "the second request waits for the first" requires launching two requests
+simultaneously and asserting ordering. In `bun test`, async timing tests are inherently flaky when
+based on wall-clock delays.
+
+**Prevention:**
+- Test the queue logic in isolation by injecting a mock `TranscriptionService` that takes a
+  configurable delay:
+  ```typescript
+  const slowService = { transcribe: () => new Promise(r => setTimeout(r, 100)) };
+  ```
+- Assert that the second request's promise does not resolve until the first's mock delay completes.
+- Do not test ordering based on HTTP response arrival time — test based on queue state inspection.
+
+**Phase:** Concurrency queue testing.
 
 ---
 
 ## Phase-Specific Warnings
 
-| Phase | Topic | Likely Pitfall | Mitigation |
-|-------|-------|---------------|------------|
-| Phase 1 — Adapters | SDK client init | SDK default retries fight failover | `maxRetries: 0` on all SDK clients |
-| Phase 1 — Adapters | Error handling | SDK error objects leak provider details | Sanitize at adapter boundary |
-| Phase 1 — Auth | Key comparison | Timing attack via string equality | `crypto.timingSafeEqual` |
-| Phase 1 — Validation | Field passthrough | Unsupported fields reach Cerebras → 400 | Strict allowlist before provider call |
-| Phase 2 — Cooldowns | Header parsing | Groq duration strings vs Cerebras float seconds | Provider-specific parsers |
-| Phase 2 — Routing | Failover | 498 not in routing table | Explicit `case 498` alongside `429` |
-| Phase 2 — Stream relay | SSE format | Raw content strings, not `data: JSON` format | Full chunk serialization |
-| Phase 2 — Stream relay | Idle timeout | Bun 10s default kills quiet streams | `server.timeout(req, 0)` for SSE |
-| Phase 2 — Stream relay | Failover guard | Failover attempted after first chunk sent | `firstChunkSent` flag check |
-| Phase 2 — Normalization | Reasoning leakage | `delta.reasoning` forwarded in stream | Strip per-chunk in relay |
-| Phase 2 — Normalization | Model field | Provider ID forwarded in chunks | Rewrite `chunk.model` per chunk |
-| Phase 3 — Tests | State isolation | Router state pollutes test order | `router.reset()` in `beforeEach` |
-| Phase 3 — Tests | Stream assertions | `response.text()` misses chunk-order bugs | Direct async iterable testing |
+| Phase Topic | Likely Pitfall | Mitigation |
+|---|---|---|
+| Multipart parsing | Bun boundary parse error on malformed Content-Type | try/catch `formData()`, return OpenAI 400 |
+| Multipart parsing | Binary data truncated at null bytes for small files | Use real WAV fixtures ≥ 32 bytes in tests |
+| Server config | `maxRequestBodySize` 1 MiB blocks audio uploads | Separate `AUDIO_MAX_FILE_BYTES` env var |
+| Startup validation | Whisper binary not on PATH in clean/Docker env | `Bun.which()` check at startup; fail fast |
+| Startup validation | Model file path has spaces or is missing | Validate path at startup; report in `/ready` |
+| Audio preprocessing | Client sends MP3/M4A/WebM but whisper expects WAV | Always ffmpeg-convert before whisper |
+| Subprocess invocation | Whisper stdout contains progress noise, not transcript | Use `--output-json` to file, not stdout |
+| Subprocess invocation | Path with spaces causes shell-split | Array-style `Bun.spawn` args, UUID temp names |
+| Temp file lifecycle | Crash or throw leaves temp files on disk | `try/finally` + startup sweep + SIGTERM handler |
+| Subprocess lifecycle | Client disconnects but whisper keeps running | `request.signal` abort kills subprocess |
+| Subprocess lifecycle | Long audio blocks handler past client timeout | `server.timeout(request, 0)` + app-level timeout |
+| Concurrency | Two whisper processes saturate CPU | Serial semaphore queue with max depth |
+| Response format | Wrong `Content-Type` for `text`/`srt`/`vtt` formats | Map `response_format` to Content-Type header |
+| Auth coverage | New route added before auth guard | Always test 401 for new endpoints |
+| Testability | Inline `Bun.spawn` call not injectable | `TranscriptionService` interface + injection |
+| CI compatibility | Tests require whisper binary | `test.skipIf(!Bun.which("whisper"))` guard |
 
 ---
 
 ## Sources
 
-- Bun SSE and idleTimeout: https://bun.sh/docs/runtime/http/server and https://github.com/oven-sh/bun/issues/13712
-- Bun test isolation: https://github.com/oven-sh/bun/blob/main/docs/test/runtime-behavior.mdx
-- groq-sdk retries default: https://github.com/groq/groq-typescript/blob/main/README.md
-- cerebras-cloud-sdk retries default: https://github.com/cerebras/cerebras-cloud-sdk-node/blob/main/README.md
-- Groq rate-limit header format: https://console.groq.com/docs/rate-limits
-- Cerebras rate-limit headers: https://inference-docs.cerebras.ai/support/rate-limits
-- Cerebras streaming chunk structure: https://context7.com/cerebras/cerebras-cloud-sdk-node/llms.txt
-- Groq streaming usage extra chunk: https://github.com/BerriAI/litellm/issues/17136
-- Cerebras unsupported fields: https://inference-docs.cerebras.ai/resources/openai
-- LiteLLM Groq failover delay bug: https://github.com/BerriAI/litellm/issues/3274
-- Groq error codes including 498: https://console.groq.com/docs/errors
+- Bun FormData boundary bug (one leading dash): https://github.com/oven-sh/bun/issues/29630
+- Bun FormData null-byte truncation: https://github.com/oven-sh/bun/issues/26740
+- Bun FormData missing final boundary: https://github.com/oven-sh/bun/issues/6038
+- Bun PATH lookup failure in compiled binaries: https://github.com/oven-sh/bun/issues/10865
+- Bun idleTimeout default 10s: https://github.com/oven-sh/bun/issues/13392
+- Bun server.timeout per-request API: https://bun.com/reference/bun/Server/timeout
+- Bun maxRequestBodySize: https://bun.com/docs/runtime/http/server
+- whisper.cpp model path with spaces: https://github.com/ggml-org/whisper.cpp/issues/1038
+- whisper.cpp stdout vs output-file behavior: https://github.com/ggml-org/whisper.cpp/issues/17
+- whisper hallucination on silence: https://github.com/ggml-org/whisper.cpp/issues/1724
+- whisper.cpp concurrency model: https://deepwiki.com/ggml-org/whisper.cpp/3.2-http-server
+- OpenAI audio format requirements: https://platform.openai.com/docs/guides/speech-to-text
+- whisper cold start CLI per-request: https://github.com/openai/whisper/discussions/669
+- faster-whisper filename with spaces: https://github.com/SYSTRAN/faster-whisper/issues/613
+- OpenAI audio response_format options: https://platform.openai.com/docs/api-reference/audio/createTranscription
+- @mjackson/multipart-parser (Bun-compatible alternative): https://jsr.io/@mjackson/multipart-parser
+- Bun file descriptor inheritance and close_range: https://github.com/oven-sh/bun/issues/15020
