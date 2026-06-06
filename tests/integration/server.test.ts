@@ -399,8 +399,11 @@ describe('Integration: routing and streaming tests', () => {
 
     test('TEST-15: understated Content-Length with >1 MiB body is rejected', async () => {
         // Content-Length: 1 — header says tiny, actual body is oversized.
-        // Bun's HTTP transport rejects mismatched Content-Length with 431 before reaching
-        // the app handler, same as malformed headers. Security property holds: request rejected.
+        // After the streaming-read fix (04-03), the app layer reads actual wire bytes via
+        // ReadableStream and counts them independently of the Content-Length header.
+        // The running byte counter exceeds maxRequestBodyBytes before the stream is done,
+        // so the app returns 413 request_too_large before JSON.parse is attempted.
+        // 431 is no longer possible here: the app intercepts before Bun's transport can reject.
         const oversizedBody = JSON.stringify({
             model: 'gpt-oss-120b-balanced',
             messages: [{ role: 'user', content: 'x'.repeat(1_048_577) }],
@@ -414,7 +417,8 @@ describe('Integration: routing and streaming tests', () => {
             },
             body: oversizedBody,
         });
-        expect([413, 431]).toContain(res.status);
+        expect(res.status).toBe(413);
+        expect((await res.json() as any).error?.code).toBe('request_too_large');
     });
 
 });
