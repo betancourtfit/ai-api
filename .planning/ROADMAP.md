@@ -101,7 +101,7 @@ Plans:
   3. `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, and `AUDIO_MAX_FILE_BYTES` are read from environment and surfaced in the config object; a missing `WHISPER_MODEL_ALIAS` does not crash the server.
   4. `maxRequestBodySize` in `Bun.serve()` is raised to the configured audio limit without changing the 1 MiB chat-completion behavior.
 
-**Plans:** 1/1 plans complete
+**Plans:** 2/2 plans complete
 
 Plans:
 
@@ -145,7 +145,7 @@ Plans:
 | 1. Foundation | 2/2 | Complete | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete | 2026-06-05 |
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
-| 4. Audio Foundation | 1/1 | Complete   | 2026-06-06 |
+| 4. Audio Foundation | 2/2 | Complete   | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 0/? | Not started | - |
 | 6. Whisper Sidecar + Models + Ready | 0/? | Not started | - |
 
