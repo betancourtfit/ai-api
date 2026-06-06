@@ -249,23 +249,25 @@ describe('Integration: routing and streaming tests', () => {
             );
         });
 
-        // First request: cerebras throws 429, groq handles it
+        // First request: cerebras throws 429, failover to groq; cooldownUntil = now + max(30,60)s = 60s
         const res1 = await post(validBody);
         expect(res1.status).toBe(200);
+        const body1 = await res1.json() as { choices?: Array<{ message?: { content?: string } }> };
+        expect(body1.choices?.[0]?.message?.content).toBe('groq');
 
-        // Advance clock past the cooldown (max(30, 60)=60s → advance 61s)
+        // Advance clock past the cooldown (max(30, 60)=60s → advance 61s).
+        // WR-04 fix: do NOT call resetForTesting() here — that wipes the cooldown and makes
+        // the assertion vacuous (cerebras would be selected even without clock advance).
+        // Only reset the mock implementations so the next call succeeds.
         setSystemTime(new Date(before + 61_000));
-
-        // After cooldown expires cerebras is eligible again
-        // With cursor advanced to groq from request 1, next cursor wraps back
-        // Reset cursor state to confirm cerebras re-enters rotation
-        resetForTesting();
         resetMockAdapter(mockCerebras);
         resetMockAdapter(mockGroq);
 
+        // Second request: cooldown expired at +60s; cerebras is now eligible again.
+        // cursor was advanced to groq after request 1 → wraps back to cerebras (index 0).
         const res2 = await post(validBody);
         expect(res2.status).toBe(200);
-        // cerebras should have received a call (back in rotation after clock advance)
+        // cerebras must have been called — proves isEligible() consulted Date.now() correctly
         expect(mockCerebras.completeMock.mock.calls.length).toBeGreaterThan(0);
         // Real time is restored by the harness afterEach setSystemTime() call
     });
