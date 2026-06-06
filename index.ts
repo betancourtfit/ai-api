@@ -46,12 +46,19 @@ function extractBearerToken(request: Request): string | null {
     return header.slice(7);
 }
 
-// AUTH-03: constant-time comparison — length pre-check prevents timingSafeEqual throw (Pitfall 6)
+// AUTH-03: constant-time comparison — pad both buffers to maxLen so timingSafeEqual always runs.
+// The prior length pre-check leaked the key's byte length as a timing oracle (CR-01).
 function verifyToken(token: string, expected: string): boolean {
-    const a = Buffer.from(token);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    const enc = new TextEncoder();
+    const a = enc.encode(token);
+    const b = enc.encode(expected);
+    const maxLen = Math.max(a.length, b.length);
+    const paddedA = new Uint8Array(maxLen);
+    const paddedB = new Uint8Array(maxLen);
+    paddedA.set(a);
+    paddedB.set(b);
+    // timingSafeEqual always runs — no length oracle
+    return timingSafeEqual(paddedA, paddedB) && a.length === b.length;
 }
 
 function authNotConfiguredError(): Response {
