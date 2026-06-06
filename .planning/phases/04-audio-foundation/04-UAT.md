@@ -1,5 +1,5 @@
 ---
-status: diagnosed
+status: resolved
 phase: 04-audio-foundation
 source:
   - .planning/phases/04-audio-foundation/04-01-SUMMARY.md
@@ -68,7 +68,7 @@ skipped: 0
 ## Gaps
 
 - truth: "POST /v1/chat/completions with understated Content-Length: 1 and body > 1 MiB returns 413 request_too_large"
-  status: diagnosed
+  status: resolved
   reason: "User reported: Got 400 invalid_request_error instead. Bun honors Content-Length: 1, reads 1 byte, JSON.parse fails before Buffer.byteLength gate runs."
   severity: minor
   test: 5
