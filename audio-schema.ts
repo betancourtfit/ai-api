@@ -1,6 +1,7 @@
 // audio-schema.ts — Zod v4 strict allowlist validation for audio transcription (AUDIO-01..06)
 // Structural mirror of request-schema.ts.
 import * as z from 'zod';
+import { getUnrecognizedKey } from './schema-utils.ts';
 
 // Strict 3-field allowlist per AUDIO-01..05:
 //   model: required string (AUDIO-02)
@@ -33,10 +34,8 @@ export function validateAudioTranscription(input: unknown):
     if (firstIssue.path.length > 0) {
         // Named path: use path[0] (covers 'file', 'model', 'response_format', etc.)
         param = String(firstIssue.path[0]);
-    } else if (firstIssue.code === 'unrecognized_keys' && 'keys' in firstIssue) {
-        // Top-level unrecognized key — extract first offending key name (OpenAI-faithful)
-        const keys = (firstIssue as { keys?: string[] }).keys;
-        param = (keys && keys[0]) ? keys[0] : null;
+    } else if (firstIssue.code === 'unrecognized_keys') {
+        param = getUnrecognizedKey(firstIssue);
     } else {
         param = null;
     }

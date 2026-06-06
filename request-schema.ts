@@ -1,6 +1,7 @@
 // request-schema.ts — Zod v4 strict allowlist validation (VALID-01/02/03/04/05/06/07)
 // Uses z.strictObject() — rejects any key not in the schema (Pitfall 7: no .strict() in v4)
 import * as z from 'zod';
+import { getUnrecognizedKey } from './schema-utils.ts';
 
 // Message schema: name field intentionally OMITTED (VALID-05 — rejected by z.strictObject())
 const messageSchema = z.strictObject({
@@ -47,10 +48,8 @@ export function validateChatCompletion(body: unknown):
     if (firstIssue.path.length > 0) {
         // Named path: use path[0] (covers 'messages', 'n', 'stream', etc.)
         param = String(firstIssue.path[0]);
-    } else if (firstIssue.code === 'unrecognized_keys' && 'keys' in firstIssue) {
-        // Top-level unrecognized key — extract first offending key name (OpenAI-faithful)
-        const keys = (firstIssue as { keys?: string[] }).keys;
-        param = (keys && keys[0]) ? keys[0] : null;
+    } else if (firstIssue.code === 'unrecognized_keys') {
+        param = getUnrecognizedKey(firstIssue);
     } else {
         param = null;
     }

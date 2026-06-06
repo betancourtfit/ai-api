@@ -46,10 +46,13 @@ describe("validateAudioTranscription", () => {
 
 // Plan 04-01 Task 2: hardened allowlist + size cases
 describe("validateAudioTranscription — hardened allowlist", () => {
-    test("unknown field 'language' returns success:false", () => {
+    test("unknown field 'language' returns success:false with param='language'", () => {
         const file = new File(["audio data"], "t.mp3", { type: "audio/mpeg" });
         const result = validateAudioTranscription({ model: "whisper-1", file, language: "en" });
         expect(result.success).toBe(false);
+        if (!result.success) {
+            expect(result.param).toBe('language');
+        }
     });
 
     test("response_format 'text' returns success:false (AUDIO-04/05)", () => {
