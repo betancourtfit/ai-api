@@ -187,9 +187,10 @@ export function createServer(
 
             // POST /v1/chat/completions — main non-streaming completion endpoint
             if (request.method === 'POST' && pathname === '/v1/chat/completions') {
-                // WHSP-05: enforce 1 MiB chat limit explicitly (maxRequestBodySize is set to audio ceiling)
-                const contentLength = Number(request.headers.get('content-length') ?? 0);
-                if (contentLength > config.maxRequestBodyBytes) {
+                // WHSP-05: enforce 1 MiB chat limit on actual buffered bytes — header not trusted
+                // Optional fast-fail on clearly valid numeric headers to avoid buffering obviously-large requests
+                const declaredLength = Number(request.headers.get('content-length'));
+                if (Number.isFinite(declaredLength) && declaredLength > config.maxRequestBodyBytes) {
                     return withRequestId(openaiError(
                         `Request body too large. Maximum is ${config.maxRequestBodyBytes} bytes.`,
                         'invalid_request_error',
@@ -199,10 +200,27 @@ export function createServer(
                     ));
                 }
 
-                // Parse JSON body
+                // Read raw body and enforce actual byte length — prevents chunked/NaN/understated bypass
+                let raw: string;
+                try {
+                    raw = await request.text();
+                } catch {
+                    return withRequestId(openaiError('Failed to read request body.', 'invalid_request_error', 'invalid_request_error', null, 400));
+                }
+                if (Buffer.byteLength(raw) > config.maxRequestBodyBytes) {
+                    return withRequestId(openaiError(
+                        `Request body too large. Maximum is ${config.maxRequestBodyBytes} bytes.`,
+                        'invalid_request_error',
+                        'request_too_large',
+                        null,
+                        413
+                    ));
+                }
+
+                // Parse JSON body from already-buffered raw string
                 let body: unknown;
                 try {
-                    body = await request.json();
+                    body = JSON.parse(raw);
                 } catch {
                     return withRequestId(openaiError('Request body must be valid JSON.', 'invalid_request_error', 'invalid_request_error', null, 400));
                 }
