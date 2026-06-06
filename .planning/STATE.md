@@ -25,7 +25,7 @@ progress:
 
 Phase: 6
 Plan: Not started
-Status: Executing Phase 05
+Status: Phase 6 context gathered — ready to plan
 Last activity: 2026-06-06
 
 Progress bar: ░░░░░░░░░░ 0% (0/3 phases)
@@ -55,6 +55,7 @@ Progress bar: ░░░░░░░░░░ 0% (0/3 phases)
 - **v2.0:** Phase 4 gates: all tests pass without whisper binary installed — schema/config work is self-contained
 - **v2.0:** Phase 5 gates: 100% TEST2-xx coverage against mocked WhisperService before touching real binary
 - **v2.0:** maxRequestBodySize raised to audio limit in Bun.serve(); chat-completion 1 MiB limit enforced at validation layer
+- **Phase 6:** HttpWhisperService activates only when WHISPER_MODEL_ALIAS is set; lives in whisper-service.ts; inline entrypoint wiring; boot never blocked by sidecar health
 
 ### Todos
 
@@ -66,10 +67,11 @@ None
 
 ## Session Continuity
 
-**Last action:** v2.0 roadmap created — Phases 4, 5, 6 defined with 25 requirements mapped
-**Next action:** Run `/gsd:plan-phase 4` to decompose Phase 4 into executable plans
+**Last action:** Phase 6 discuss-phase — CONTEXT.md captured (boot wiring decisions)
+**Next action:** Run `/gsd:plan-phase 6` to decompose Phase 6 into executable plans
+**Resume file:** `.planning/phases/06-whisper-sidecar-models-ready/06-CONTEXT.md`
 
 ---
 
 *State initialized: 2026-06-04*
-*Last updated: 2026-06-06 — v2.0 milestone roadmap complete; Phase 4 is next*
+*Last updated: 2026-06-06 — Phase 6 context gathered*
