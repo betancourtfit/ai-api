@@ -42,9 +42,18 @@ export function chooseEligibleProviders(logicalModel: string): Provider[] {
         providerOrder[(roundRobinCursor + index) % providerOrder.length]
     ));
 
-    return rotatedOrder.filter((provider): provider is Provider => (
+    const eligible = rotatedOrder.filter((provider): provider is Provider => (
         provider !== undefined && isEligible(provider, logicalModel)
     ));
+
+    // WR-05: stamp lastSelectedAt for each provider added to the result list so
+    // the diagnostics endpoint reports accurate selection times (not always null).
+    const now = Date.now();
+    for (const provider of eligible) {
+        state[provider].lastSelectedAt = now;
+    }
+
+    return eligible;
 }
 
 export function advanceCursor(): void {
