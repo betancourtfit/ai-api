@@ -2,236 +2,88 @@
 phase: 04-audio-foundation
 reviewed: 2026-06-06T00:00:00Z
 depth: standard
-files_reviewed: 20
+files_reviewed: 2
 files_reviewed_list:
-  - .env.test
-  - audio-schema.ts
-  - config.ts
   - index.ts
-  - model-registry.ts
-  - package.json
-  - request-schema.test.ts
-  - request-schema.ts
-  - response-normalizer.ts
-  - routing/cooldown-manager.ts
-  - routing/provider-state.ts
-  - services/cerebras.ts
-  - services/groq.ts
-  - tests/integration/mock-adapters.ts
   - tests/integration/server.test.ts
-  - tests/routing/cooldown-manager.test.ts
-  - tests/routing/provider-state.test.ts
-  - tests/unit/audio-schema.test.ts
-  - tests/unit/response-normalizer.test.ts
-  - types.ts
 findings:
-  critical: 3
+  critical: 2
   warning: 4
   info: 3
-  total: 10
-status: fixed
+  total: 9
+status: issues_found
 ---
 
 # Phase 04: Code Review Report
 
 **Reviewed:** 2026-06-06
 **Depth:** standard
-**Files Reviewed:** 20
+**Files Reviewed:** 2
 **Status:** issues_found
 
 ## Summary
 
-Phase 04 adds the audio transcription schema and config foundation (`audio-schema.ts`, new `config.ts`
-fields for Whisper sidecar and file-size limits), extends `types.ts` with `AudioTranscriptionResult`,
-and hardens the chat body-size gate in `index.ts` with `Buffer.byteLength` enforcement and a
-`Number.isFinite` fast-fail. The new audio schema and per-field validators are structurally correct.
-The `Buffer.byteLength(raw)` gate is the right mechanism for closing the chunked-encoding bypass.
+Review focused on the new ReadableStream body-reader in `index.ts` (POST /v1/chat/completions) that replaced `request.text()`, plus the surrounding routing and streaming paths and their integration tests.
 
-Three critical defects were found across the full file set:
-
-1. A non-numeric value in `MAX_REQUEST_BODY_BYTES` or `AUDIO_MAX_FILE_BYTES` produces `NaN` via
-   bare `Number()`, silently disabling both the 1 MiB chat gate and the 25 MiB audio file-size check
-   (both comparisons with `NaN` return `false` and pass through unlimited data).
-2. A `429` response from a provider that carries no response headers skips the cooldown entirely —
-   the provider immediately re-enters the eligible pool on the next request, violating the
-   `DEFAULT_COOLDOWN_SECONDS` fallback rule in `CLAUDE.md §13.3`.
-3. Errors that occur mid-stream after the first SSE chunk has been sent are silently swallowed: no
-   log entry is emitted and no `data: [DONE]` sentinel is written, leaving SSE-aware clients hanging.
+The streaming body reader is structurally sound — it counts actual wire bytes, handles cancellation, and decodes correctly. However, two critical issues were found: a logic error that allows a zero-byte empty body to bypass the body gate entirely and reach `JSON.parse("")` producing a misleading error code, and a `verifyToken` length pre-check that leaks the expected key length via a timing side-channel, directly undermining the stated constant-time comparison guarantee. Four warnings cover: a missing `finally` that can leave the ReadableStream locked after a mid-read error, use of `chosenProvider` (outer scope) instead of the closure-safe `finalProvider` when building streaming response headers, cursor advancement before confirming any eligible provider exists, and a lone `as any` cast in the test file. Three info items cover: missing streaming-failover integration test coverage, a non-obvious log-level comparison direction, and a missing guard for the `PROXY_KEY` env var in the test suite.
 
 ---
 
 ## Critical Issues
 
-### CR-01: NaN from invalid numeric env vars silently disables both body-size checks
+### CR-01: Empty body bypasses byte-gate and reaches `JSON.parse("")` with wrong error code
 
-**File:** `config.ts:37-38`, `index.ts:193,210`
+**File:** `index.ts:210-262`
 
-**Issue:** All new size-related env vars are parsed with bare `Number()`:
+**Issue:** When a client sends a POST with no body (or an empty body), `request.body` is a ReadableStream that yields zero chunks. The `!request.body` guard on line 210 does **not** catch this — a present-but-empty ReadableStream is truthy. The `while(true)` loop exits immediately on the first `done=true` read, `runningTotal` stays 0, `limitExceeded` stays false, and `chunks` is empty. `new TextDecoder().decode(new Uint8Array(0))` returns `""`. Then `JSON.parse("")` at line 259 throws `SyntaxError`, which is caught by the **outer** `catch` at line 252 — returning the `'Failed to read request body.'` message with code `invalid_request_error`, rather than the `'Request body must be valid JSON.'` path that would be reached if the body were non-empty invalid JSON. The functional consequence is a misleading error message; both paths return HTTP 400, but the wrong `code` is emitted and the wrong catch block is exercised.
 
-```ts
-// config.ts:37-38
-audioMaxFileBytes:   Number(process.env["AUDIO_MAX_FILE_BYTES"]   ?? 26_214_400),
-maxRequestBodyBytes: Number(process.env["MAX_REQUEST_BODY_BYTES"] ?? 1_048_576),
-```
-
-`Number("25MB")` and `Number("disabled")` both return `NaN`. That `NaN` propagates into both
-guards in the chat endpoint:
-
-```ts
-// index.ts:193 — fast-fail: Number.isFinite(NaN) → false → skipped (by design, fine here)
-if (Number.isFinite(declaredLength) && declaredLength > config.maxRequestBodyBytes)
-
-// index.ts:210 — ACTUAL gate: Buffer.byteLength(raw) > NaN → false → body is never rejected
-if (Buffer.byteLength(raw) > config.maxRequestBodyBytes)
-```
-
-The actual gate at line 210 fails open when `maxRequestBodyBytes` is `NaN`: `n > NaN` is always
-`false` in IEEE 754, so every request body passes regardless of size.
-
-The same applies to `audioMaxFileBytes`:
-- `file.size > NaN` in `validateAudioFileSize` → `false` → any file size accepted.
-- `maxRequestBodySize: NaN` passed to `Bun.serve()` → Bun falls back to its internal default
-  (128 MiB), silently widening the transport gate.
-
-**Fix:** Validate numeric env vars at startup and throw on invalid input so the failure is loud:
-
-```ts
-function requiredPositiveInt(name: string, fallback: number): number {
-    const raw = process.env[name]?.trim();
-    if (!raw) return fallback;
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value <= 0) {
-        throw new Error(
-            `Config: ${name}="${raw}" must be a positive finite number (got ${value})`
-        );
-    }
-    return Math.floor(value);
-}
-
-// in config object:
-audioMaxFileBytes:   requiredPositiveInt("AUDIO_MAX_FILE_BYTES",   26_214_400),
-maxRequestBodyBytes: requiredPositiveInt("MAX_REQUEST_BODY_BYTES", 1_048_576),
-```
-
-Apply the same pattern to `defaultCooldownSeconds`, `maxProviderAttemptsPerRequest`,
-`whisperPort`, and `whisperTimeoutMs` for defence-in-depth.
-
----
-
-### CR-02: 429 response with no response headers skips DEFAULT_COOLDOWN_SECONDS — provider stays eligible
-
-**File:** `index.ts:329` (streaming path), `index.ts:536` (non-streaming path)
-
-**Issue:** Both error-handling loops gate the cooldown-setting on `classified.headers` being truthy:
-
-```ts
-if ((classified.status === 429 || classified.status === 498) && classified.headers) {
-    // parse headers, calc cooldown, setCooldown(provider, ...)
-    continue;
-}
-
-// Falls through here when status === 429 but headers === undefined:
-failoverReason = `status_429`;
-log('warn', { event: 'provider_failover', ... });
-// NO setCooldown call — provider.healthy remains true, cooldownUntil stays null
-```
-
-When a provider SDK throws a `429` without attaching response headers (network interception,
-SDK-level error, upstream proxy stripping headers), `classified.headers` is `undefined`, the
-inner block is skipped, and `setCooldown` is never called. `recordFailure` only increments
-`consecutiveFailures` and does not affect `entry.healthy`. On the very next request, the
-429-ing provider is fully eligible and selected again.
-
-`CLAUDE.md §13.3` states explicitly: *"If reset data is unavailable, use DEFAULT_COOLDOWN_SECONDS."*
-
-**Fix:** Separate the cooldown decision from the header-parsing availability check. Apply this fix
-to both the streaming path (~line 329) and the non-streaming path (~line 536):
-
-```ts
-if (classified.status === 429 || classified.status === 498) {
-    const parsed = classified.headers
-        ? parseRateLimitHeaders(provider, classified.headers)
-        : {};
-    const snapshot = classified.headers
-        ? toRateLimitSnapshot(parsed as Record<string, number | undefined>)
-        : {};
-    const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
-    const cooldownUntil = Date.now() + cooldownMs;
-
-    setCooldown(provider, cooldownUntil,
-        Object.keys(snapshot).length > 0 ? snapshot : undefined);
-    failoverReason = `status_${classified.status}`;
-    log('warn', {
-        event: 'provider_cooldown',
-        requestId,
-        provider,
-        status: classified.status,
-        cooldownUntil: new Date(cooldownUntil).toISOString(),
-    });
-    continue;
+**Fix:** After the `if (limitExceeded)` block and before building `combined`, add an explicit empty-body check:
+```typescript
+if (chunks.length === 0) {
+    return withRequestId(openaiError(
+        'Request body is required.',
+        'invalid_request_error',
+        'body_required',
+        null,
+        400
+    ));
 }
 ```
 
 ---
 
-### CR-03: Mid-stream error after first SSE chunk is silently swallowed — no log, no [DONE] sentinel
+### CR-02: `verifyToken` length pre-check leaks expected key length via timing side-channel
 
-**File:** `index.ts:423-450`
+**File:** `index.ts:50-55`
 
-**Issue:** The streaming generator's catch block is guarded by `if (!firstChunkSent)`. When
-`firstChunkSent` is `true` and the stream fails mid-way, the catch body does nothing:
+**Issue:** The `verifyToken` function performs a plain `a.length !== b.length` check before `timingSafeEqual`. When lengths differ, the function returns `false` immediately without calling `timingSafeEqual`. This early-return branch is measurably faster than the constant-time comparison, making the response latency observable: an attacker can submit tokens of varying byte-lengths and measure response time to confirm exactly how long the proxy key is. Once the length is known, brute-force search space is dramatically reduced. The comment on line 49 acknowledges needing to avoid the `timingSafeEqual` throw for different-length inputs, but the chosen solution trades the throw for a timing oracle.
 
-```ts
-} catch (err) {
-    if (!firstChunkSent) {
-        // logs here only — firstChunkSent=true skips this entirely
-    }
-    // When firstChunkSent === true:
-    // - no log of any kind
-    // - no request_complete event
-    // - no yield of 'data: [DONE]\n\n'
-    // generator returns normally; stream connection closes
+The CLAUDE.md spec §6 requires "use constant-time comparison when practical."
+
+**Fix:** Pad both buffers to a fixed maximum length so `timingSafeEqual` always runs, then also confirm lengths match to prevent false positives from padding:
+```typescript
+function verifyToken(token: string, expected: string): boolean {
+    // Pad both to MAX so timingSafeEqual always executes — no fast-exit on length difference.
+    // The final length check is a plain boolean operation, not a timing-observable branch
+    // of the crypto comparison path.
+    const MAX = 512;
+    const a = Buffer.alloc(MAX);
+    const b = Buffer.alloc(MAX);
+    Buffer.from(token).copy(a);
+    Buffer.from(expected).copy(b);
+    const constantTimeEq = timingSafeEqual(a, b);
+    return constantTimeEq && token.length === expected.length;
 }
 ```
+Alternatively, use HMAC to normalize lengths before comparison, which eliminates the length leak entirely:
+```typescript
+import { createHmac } from 'node:crypto';
 
-Consequences:
-1. The downstream client receives a truncated SSE stream with no `data: [DONE]` sentinel.
-   OpenAI-compatible SDK clients and `EventSource` consumers that wait for `[DONE]` will hang
-   or time out rather than closing gracefully.
-2. No `request_complete` log is emitted, creating a complete observability blind spot for
-   mid-stream failures.
-3. `CLAUDE.md §16` item 4 requires the `data: [DONE]` sentinel to always be present.
-
-**Fix:** Log the error and yield `[DONE]` unconditionally, regardless of `firstChunkSent`:
-
-```ts
-} catch (err) {
-    const classified = classifyError(err);
-    log('warn', {
-        event: firstChunkSent
-            ? 'stream_error_after_first_chunk'
-            : 'stream_error_before_first_chunk',
-        requestId,
-        provider: finalProvider,
-        status: classified.status,
-    });
-    log('info', {
-        event: 'request_complete',
-        requestId,
-        timestamp: new Date(requestStart).toISOString(),
-        route: `${request.method} ${pathname}`,
-        logicalAlias: input.model,
-        provider: finalProvider,
-        upstreamModelId: finalUpstreamModelId,
-        attempt: finalAttemptCount,
-        streaming: true,
-        statusCode: classified.status ?? 500,
-        latencyMs: Date.now() - requestStart,
-        failoverReason: finalFailoverReason,
-        usage: streamUsage,
-    });
-    // Always emit [DONE] — SSE protocol requires the sentinel even on error
-    yield 'data: [DONE]\n\n';
+function verifyToken(token: string, expected: string): boolean {
+    // HMAC normalizes both inputs to fixed digest length — no length information leaks.
+    const a = createHmac('sha256', expected).update(token).digest();
+    const b = createHmac('sha256', expected).update(expected).digest();
+    return timingSafeEqual(a, b);
 }
 ```
 
@@ -239,228 +91,132 @@ Consequences:
 
 ## Warnings
 
-### WR-01: `recordSuccess` called before any stream data is consumed — premature success state
+### WR-01: Inner reader not released on mid-read error — ReadableStream can remain locked
 
-**File:** `index.ts:382`
+**File:** `index.ts:218-232`
 
-**Issue:** `recordSuccess(chosenProvider, 200)` is called immediately after `adapter.stream()`
-resolves. `adapter.stream()` returns an `AsyncIterable` without consuming any bytes — it only
-opens the upstream connection. If the first `for await` iteration inside the generator throws,
-the provider state already shows `lastSuccessAt = Date.now()`, `lastStatusCode = 200`, and
-`consecutiveFailures = 0`. The `catch` block at line 423 then runs with `firstChunkSent = false`
-but cannot undo the already-committed success record. The `/internal/providers/status` endpoint
-would display the provider as healthy following a stream-open failure.
+**Issue:** The inner `try/catch` around the `while(true)` reader loop (lines 218-232) catches errors from `reader.read()` and immediately returns an error response — but it does **not** call `reader.releaseLock()` before returning. When the `catch` branch is taken (network error, premature disconnect, etc.), the `ReadableStream` body remains in a locked state. In Bun's HTTP model the connection eventually cleans up, but the stream is not properly signalled as consumed, and any future attempt by the framework to inspect or drain `request.body` will encounter a locked stream.
 
-**Fix:** Move `recordSuccess` into the generator body, called on the first data received:
-
-```ts
-const body = (async function* () {
-    let firstChunkSent = false;
-    try {
-        for await (const chunk of sdkStream) {
-            const normalized = normalizeChunk(chunk, input.model);
-            if (!hasVisibleChunkData(normalized)) continue;
-            if (!firstChunkSent) {
-                recordSuccess(finalProvider, 200); // first real data — mark success now
-                firstChunkSent = true;
-            }
-            yield `data: ${JSON.stringify(normalized)}\n\n`;
+**Fix:** Add a `finally` block to release the lock when the read loop exits abnormally:
+```typescript
+try {
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        runningTotal += value.byteLength;
+        if (runningTotal > config.maxRequestBodyBytes) {
+            limitExceeded = true;
+            await reader.cancel();
+            break;
         }
-        if (!firstChunkSent) recordSuccess(finalProvider, 200); // complete but empty stream
-        yield 'data: [DONE]\n\n';
-        // ... log request_complete ...
-    } catch (err) {
-        recordFailure(finalProvider, classifyError(err).status ?? 0);
-        // ... log + yield [DONE] per CR-03 fix ...
+        chunks.push(value);
     }
-})();
-```
-
-Remove the `recordSuccess` call at the current line 382.
-
----
-
-### WR-02: `streamUsage` is a dead variable — always `null` in completion logs
-
-**File:** `index.ts:393,421,447`
-
-**Issue:** `let streamUsage: unknown = null` is declared at line 393 and never assigned any
-value other than `null`. Every `request_complete` log for the streaming path emits `usage: null`.
-The Cerebras and Groq streaming SDKs do emit a terminal usage chunk (a chunk with
-`choices: []` and a populated `usage` field); this information is currently discarded. The
-OBS-02 observability requirement for per-request token usage is never satisfied on streaming
-requests.
-
-**Fix:** Capture the usage from the terminal chunk, or document the incompleteness with a typed
-placeholder:
-
-```ts
-// Minimal capture (streams a usage-carrying terminal chunk):
-for await (const chunk of sdkStream) {
-    const rawChunk = chunk as Record<string, unknown>;
-    if (rawChunk['usage'] && Array.isArray(rawChunk['choices']) &&
-            (rawChunk['choices'] as unknown[]).length === 0) {
-        streamUsage = rawChunk['usage'];
-        continue; // terminal usage chunk — not forwarded downstream
-    }
-    const normalized = normalizeChunk(chunk, input.model);
-    // ...
+} catch {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+    return withRequestId(openaiError('Failed to read request body.', 'invalid_request_error', 'invalid_request_error', null, 400));
 }
 ```
 
-Alternatively, replace with `const streamUsage: null = null; // TODO: OBS-02 streaming usage`
-to make the incompleteness visible in the type system.
-
 ---
 
-### WR-03: `PROVIDER_ORDER` env var uses an unsafe cast with no runtime validation
+### WR-02: Streaming headers use `chosenProvider` (outer scope) instead of closure-safe `finalProvider`
 
-**File:** `config.ts:24`, `routing/provider-state.ts:21`
+**File:** `index.ts:529`
 
-**Issue:**
+**Issue:** The streaming response headers object at lines 524-530 references `chosenProvider` (declared at line 333, type `Provider | null`) for the optional `X-LLM-Provider` header. All other provider-sensitive references inside the async generator body correctly use `finalProvider` (re-assigned at line 428 after TypeScript narrowing). The header is constructed outside the generator using the outer-scope variable. While functionally equivalent at this point (both hold the same non-null value after the guard at line 400), the pattern is inconsistent and creates a maintenance hazard: if the pre-stream loop is ever refactored, `chosenProvider` could be null or stale while `finalProvider` is the correct captured value.
 
-```ts
-providerOrder: (process.env["PROVIDER_ORDER"] ?? "cerebras,groq").split(",") as Array<"cerebras" | "groq">,
-```
-
-The `as` cast is erased at runtime. An invalid value like `PROVIDER_ORDER=cerebras,groq,openai`
-places the string `"openai"` into `providerOrder`. In `provider-state.ts:27`,
-`const entry = state[provider]` returns `undefined` for `"openai"` — with `noUncheckedIndexedAccess: true`
-TypeScript types `entry` as `ProviderState | undefined`, but the code dereferences `entry.configured`
-immediately without a guard, throwing a `TypeError` that crashes the request handler.
-
-**Fix:** Validate at config load time:
-
-```ts
-providerOrder: (() => {
-    const VALID: ReadonlySet<string> = new Set(["cerebras", "groq"]);
-    const order = (process.env["PROVIDER_ORDER"] ?? "cerebras,groq")
-        .split(",").map(s => s.trim());
-    for (const p of order) {
-        if (!VALID.has(p)) {
-            throw new Error(
-                `Config: PROVIDER_ORDER contains invalid provider "${p}". ` +
-                `Allowed values: cerebras, groq`
-            );
-        }
-    }
-    return order as Array<"cerebras" | "groq">;
-})(),
+**Fix:**
+```typescript
+const streamHeaders: Record<string, string> = {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Request-ID': requestId,
+    ...(config.exposeProviderHeader ? { 'X-LLM-Provider': finalProvider } : {}),
+};
 ```
 
 ---
 
-### WR-04: TEST-03 resets all provider state inside the test — makes the cooldown-expiry assertion untestable
+### WR-03: `advanceCursor()` called unconditionally before confirming any eligible provider exists
 
-**File:** `tests/integration/server.test.ts:261-269`
+**File:** `index.ts:301-303`
 
-**Issue:** The test named "provider recovers after cooldown expiry" calls `resetForTesting()`
-inside the test body after advancing the system clock:
+**Issue:** `chooseEligibleProviders(input.model)` and `advanceCursor()` are called at lines 301-302 before the `candidates.length === 0` check at line 304. Every request that finds no eligible providers still advances the cursor. Under repeated no-eligible-provider conditions (e.g., both providers in cooldown), the cursor drifts N steps for N requests, causing non-deterministic provider ordering once providers recover. The cursor should only advance when routing actually occurs.
 
-```ts
-setSystemTime(new Date(before + 61_000));
+**Fix:** Move `advanceCursor()` to after the empty-candidates guard:
+```typescript
+const candidates = chooseEligibleProviders(input.model);
 
-// Wipes ALL state including the cooldown that was just set
-resetForTesting();
-resetMockAdapter(mockCerebras);
-resetMockAdapter(mockGroq);
+if (candidates.length === 0) {
+    // cursor NOT advanced — no provider was selected
+    log('info', { event: 'request_complete', ..., statusCode: 503 });
+    return withRequestId(openaiError(..., 503));
+}
 
-const res2 = await post(validBody);
-expect(mockCerebras.completeMock.mock.calls.length).toBeGreaterThan(0);
+advanceCursor(); // Only advance when at least one candidate exists
 ```
 
-After `resetForTesting()`, cerebras is healthy with no cooldown regardless of the clock value.
-The assertion `calls.length > 0` passes even if `isEligible` never consulted `Date.now()`.
-The test does not prove that cooldown expiry restores provider eligibility — it only proves
-that a freshly-initialized provider state allows cerebras to be selected.
+---
 
-**Fix:** Reset mocks only, not routing state. Let the cooldown expire via the clock:
+### WR-04: `as any` cast in TEST-15 bypasses strict type checking on assertion
 
-```ts
-setSystemTime(new Date(before + 61_000));
+**File:** `tests/integration/server.test.ts:421`
 
-// Reset mocks only — routing state (including the active cooldown) is preserved
-resetMockAdapter(mockCerebras);
-resetMockAdapter(mockGroq);
+**Issue:** Line 421 uses `(await res.json() as any).error?.code` — the only `as any` cast in the test file. All other response-body assertions (TEST-06, TEST-07, TEST-08, TEST-13) correctly type their `.json()` result. The `as any` cast means TypeScript cannot catch a typo in `.error?.code` at compile time, defeating the value of strict typing in the test suite.
 
-const res2 = await post(validBody);
-expect(res2.status).toBe(200);
-// Cerebras should have been selected because the cooldown expired at +60s and
-// the cursor is back to 0 (groq handled request 1, cursor advanced to groq=1, wraps to 0)
-expect(mockCerebras.completeMock.mock.calls.length).toBeGreaterThan(0);
+**Fix:**
+```typescript
+const body = await res.json() as { error?: { code?: string } };
+expect(body.error?.code).toBe('request_too_large');
 ```
 
 ---
 
 ## Info
 
-### IN-01: No `test` script in `package.json`
+### IN-01: No integration test for `stream: true` failover path
 
-**File:** `package.json`
+**File:** `tests/integration/server.test.ts` (missing test)
 
-**Issue:** `package.json` defines `start` and `dev` scripts but no `test` script. Running
-`npm test` or `bun run test` fails with "Missing script: test". CI pipelines and contributor
-tooling that rely on the conventional `test` entry point cannot discover the test suite.
+**Issue:** TEST-10 validates the happy-path SSE format for streaming. Tests TEST-02 through TEST-05 cover failover and exhaustion exclusively for the non-streaming `complete()` path. There is no test that exercises the streaming failover: the loop at `index.ts:339-397` where `adapter.stream()` throws and the proxy attempts the next eligible provider is entirely untested by integration tests. The mid-stream error path at `index.ts:486-519` (generator `catch` block emitting `[DONE]` after a failure) is also untested.
 
-**Fix:**
+**Fix:** Add a test asserting that when `mockCerebras.streamMock` throws `CerebrasAPIError(500, ...)`, the response is still HTTP 200, `Content-Type: text/event-stream`, contains `data: [DONE]`, and `mockGroq.streamMock.mock.calls.length` is 1.
 
-```json
-"scripts": {
-    "start": "bun index.ts",
-    "dev": "bun --watch run index.ts",
-    "test": "bun test"
-}
+---
+
+### IN-02: Log level gate direction non-obvious; future `debug` level addition likely to break
+
+**File:** `index.ts:17-25`
+
+**Issue:** The level gate at line 23 uses `entryLevel <= configuredLogLevel`. With `{ error: 0, warn: 1, info: 2 }` this is correct (lower number = higher severity, gate passes for same-or-less severity). However, the comment at line 16 only states the map values, not the comparison semantics. Adding a `debug: 3` level without understanding the `<=` direction would work correctly, but adding any level with a number greater than `info` expecting it to mean "more verbose" could cause confusion. The pattern is fragile because the comparison direction and numeric assignment are both load-bearing and neither is explained.
+
+**Fix:** Add a comment explaining the direction:
+```typescript
+// Severity levels: lower number = higher severity. Gate: emit when entryLevel <= configuredLogLevel.
+// error=0 (critical), warn=1 (warnings+errors), info=2 (all messages).
 ```
 
 ---
 
-### IN-02: Unknown-key `param` extraction untested in `audio-schema.test.ts`
+### IN-03: `PROXY_KEY` non-null assertion produces `"Bearer undefined"` when `.env.test` is absent
 
-**File:** `tests/unit/audio-schema.test.ts:49-53`
+**File:** `tests/integration/server.test.ts:14`
 
-**Issue:** The test `"unknown field 'language' returns success:false"` asserts only
-`result.success === false`. The `unrecognized_keys` extraction branch in
-`audio-schema.ts:36-39` — which extracts the offending key name from `firstIssue.keys` and
-returns it as `param` — is not exercised by any assertion. If that branch regresses to
-returning `null`, the test remains green.
+**Issue:** `const PROXY_KEY = process.env['PERSONAL_PROXY_API_KEY']!` uses `!` to assert non-null. If `.env.test` is absent or `PERSONAL_PROXY_API_KEY` is unset, `process.env['PERSONAL_PROXY_API_KEY']` returns `undefined`. TypeScript's `!` operator does not coerce at runtime — `PROXY_KEY` holds `undefined`. The template literal `` `Bearer ${PROXY_KEY}` `` then produces `"Bearer undefined"`, causing every auth-dependent test to fail with 401 instead of the expected status, yielding confusing test output with no indication that missing configuration is the cause.
 
-**Fix:** Assert the extracted param:
-
-```ts
-expect(result.success).toBe(false);
-if (!result.success) {
-    expect(result.param).toBe('language');
-}
-```
-
----
-
-### IN-03: Identical `as { keys?: string[] }` cast duplicated in `audio-schema.ts` and `request-schema.ts`
-
-**File:** `audio-schema.ts:38`, `request-schema.ts:52`
-
-**Issue:** Both files contain an identical pattern:
-
-```ts
-const keys = (firstIssue as { keys?: string[] }).keys;
-param = (keys && keys[0]) ? keys[0] : null;
-```
-
-In Zod v4, `unrecognized_keys` issues carry `issue.keys: string[]` directly on the typed
-`ZodUnrecognizedKeysIssue` shape. The cast to `{ keys?: string[] }` (with optional `?`)
-is weaker than the real type and the duplication will diverge on the next edit to either
-file. Both files should use the same narrowed import or a shared helper.
-
-**Fix:** Extract a shared helper or import the Zod type directly:
-
-```ts
-// shared helper in a utils file, or inline in each schema:
-function getUnrecognizedKey(issue: z.ZodIssue): string | null {
-    if (issue.code !== 'unrecognized_keys') return null;
-    // Zod v4: ZodUnrecognizedKeysIssue has keys: string[]
-    const keys = (issue as z.core.$ZodIssueUnrecognizedKeys).keys;
-    return keys[0] ?? null;
-}
+**Fix:** Add a guard in `beforeAll`:
+```typescript
+beforeAll(() => {
+    if (!PROXY_KEY) {
+        throw new Error(
+            'PERSONAL_PROXY_API_KEY is not set. Create tests/.env.test with the proxy key before running integration tests.'
+        );
+    }
+    mockCerebras = makeMockAdapter('cerebras');
+    mockGroq = makeMockAdapter('groq');
+    server = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0);
+});
 ```
 
 ---
