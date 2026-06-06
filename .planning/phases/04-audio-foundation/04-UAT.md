@@ -1,5 +1,5 @@
 ---
-status: complete
+status: diagnosed
 phase: 04-audio-foundation
 source:
   - .planning/phases/04-audio-foundation/04-01-SUMMARY.md
@@ -68,9 +68,14 @@ skipped: 0
 ## Gaps
 
 - truth: "POST /v1/chat/completions with understated Content-Length: 1 and body > 1 MiB returns 413 request_too_large"
-  status: failed
+  status: diagnosed
   reason: "User reported: Got 400 invalid_request_error instead. Bun honors Content-Length: 1, reads 1 byte, JSON.parse fails before Buffer.byteLength gate runs."
   severity: minor
   test: 5
-  artifacts: [index.ts]
-  missing: [pre-read size check before request.text() when Content-Length is understated]
+  root_cause: "Bun's request.text() honors the declared Content-Length and delivers only N bytes to the caller. With Content-Length: 1, the byte-length gate at index.ts:215 receives a 1-byte string (well under 1 MiB), passes silently, then JSON.parse fails on the truncated string producing 400 before the 413 path can fire. The header fast-fail at index.ts:192 also misses because declaredLength=1 < maxRequestBodyBytes."
+  artifacts:
+    - path: "index.ts:189-231"
+      issue: "request.text() trusts Bun transport truncation; byte-length gate never sees actual wire bytes when Content-Length is understated"
+  missing:
+    - "Replace request.text() with streaming ReadableStream read that counts bytes as they arrive; abort with 413 when running total exceeds maxRequestBodyBytes"
+  debug_session: .planning/debug/understated-content-length.md
