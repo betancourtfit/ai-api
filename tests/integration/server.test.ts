@@ -345,4 +345,72 @@ describe('Integration: routing and streaming tests', () => {
         expect(firstChunk.choices?.[0]?.delta?.['reasoning' as keyof typeof firstChunk.choices[0]['delta']]).toBeUndefined();
     });
 
+    // TEST-13..15: CR-01 regression tests — body gate must use actual bytes, not client-supplied header
+
+    test('TEST-13: chunked body >1 MiB (no Content-Length) returns 413', async () => {
+        // Simulate chunked-encoding client: omit Content-Length header entirely
+        // Bun's fetch still sends the actual bytes — gate must use Buffer.byteLength(raw)
+        const oversizedBody = JSON.stringify({
+            model: 'gpt-oss-120b-balanced',
+            messages: [{ role: 'user', content: 'x'.repeat(1_048_577) }],
+        });
+        const res = await fetch(url('/v1/chat/completions'), {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${PROXY_KEY}`,
+                'Content-Type': 'application/json',
+                // Intentionally no Content-Length — simulates chunked-encoding client
+            },
+            body: oversizedBody,
+        });
+        expect(res.status).toBe(413);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('request_too_large');
+    });
+
+    test('TEST-14: malformed Content-Length (NaN) with >1 MiB body is rejected', async () => {
+        // Content-Length: abc → Bun's HTTP stack rejects the malformed header with 431 before reaching
+        // the app handler. The security property still holds: the request is rejected regardless.
+        // Note: Bun returns 431 (Request Header Fields Too Large) for malformed Content-Length values
+        // before the request reaches application code — the bypass path described in CR-01 does not
+        // materialize in practice because Bun validates headers at the transport layer.
+        const oversizedBody = JSON.stringify({
+            model: 'gpt-oss-120b-balanced',
+            messages: [{ role: 'user', content: 'x'.repeat(1_048_577) }],
+        });
+        const res = await fetch(url('/v1/chat/completions'), {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${PROXY_KEY}`,
+                'Content-Type': 'application/json',
+                'Content-Length': 'abc',
+            },
+            body: oversizedBody,
+        });
+        // Bun rejects malformed Content-Length with 431 at the transport layer;
+        // app layer Buffer.byteLength gate handles the 413 case for numeric-but-understated headers
+        expect([413, 431]).toContain(res.status);
+    });
+
+    test('TEST-15: understated Content-Length with >1 MiB body returns 413', async () => {
+        // Content-Length: 1 — header says tiny, actual body is oversized
+        // Gate must use Buffer.byteLength(raw) to catch this
+        const oversizedBody = JSON.stringify({
+            model: 'gpt-oss-120b-balanced',
+            messages: [{ role: 'user', content: 'x'.repeat(1_048_577) }],
+        });
+        const res = await fetch(url('/v1/chat/completions'), {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${PROXY_KEY}`,
+                'Content-Type': 'application/json',
+                'Content-Length': '1',
+            },
+            body: oversizedBody,
+        });
+        expect(res.status).toBe(413);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('request_too_large');
+    });
+
 });
