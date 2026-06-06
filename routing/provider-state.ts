@@ -75,10 +75,18 @@ export function recordSuccess(provider: Provider, statusCode: number): void {
     state[provider].consecutiveFailures = 0;
 }
 
+// WR-01: circuit-breaker threshold — after 5 consecutive transient failures mark provider unhealthy
+// so the round-robin router stops selecting it. isEligible() gates on entry.healthy; the provider
+// recovers when recordSuccess() resets consecutiveFailures and healthy back to true.
+const CONSECUTIVE_FAILURE_THRESHOLD = 5;
+
 export function recordFailure(provider: Provider, statusCode: number): void {
     state[provider].lastFailureAt = Date.now();
     state[provider].lastStatusCode = statusCode;
     state[provider].consecutiveFailures += 1;
+    if (state[provider].consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
+        state[provider].healthy = false;
+    }
 }
 
 export function getStateSnapshot(): Record<Provider, ProviderState> {
