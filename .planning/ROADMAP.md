@@ -119,8 +119,15 @@ Plans:
   3. Every transcription response (success and error) carries `X-Request-ID`; structured logs record `requestId`, `latencyMs`, `fileSize`, `modelAlias`, and `status` without logging audio content or filenames.
   4. A successful mock response returns exactly `{ "text": "..." }` with HTTP 200 — no extra provider fields in the body.
 
-**Plans:** TBD
-**UI hint**: no
+**Plans:** 2 plans
+
+**Wave 1**
+
+- [ ] 05-01-PLAN.md — WhisperService interface + NoopWhisperService stub + createServer() extension + POST /v1/audio/transcriptions handler (EP2-01, AUTH2-01, AUTH2-02, OBS2-01, OBS2-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05-02-PLAN.md — 7-case audio integration test suite against mock WhisperService (TEST2-01..07)
 
 ### Phase 6: Whisper Sidecar + Models + Ready
 
@@ -146,10 +153,10 @@ Plans:
 | 2. Routing + Streaming | 2/2 | Complete | 2026-06-05 |
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
 | 4. Audio Foundation | 3/3 | Complete   | 2026-06-06 |
-| 5. Transcription Route + Auth + Tests | 0/? | Not started | - |
+| 5. Transcription Route + Auth + Tests | 0/2 | Not started | - |
 | 6. Whisper Sidecar + Models + Ready | 0/? | Not started | - |
 
 ---
 
 *Roadmap created: 2026-06-04*
-*Last updated: 2026-06-06 — v2.0 Local Audio Transcription phases 4-6 appended*
+*Last updated: 2026-06-06 — Phase 5 plans created (2 plans, 2 waves)*
