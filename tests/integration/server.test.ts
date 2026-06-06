@@ -7,25 +7,48 @@ import { APIError as CerebrasAPIError } from '@cerebras/cerebras_cloud_sdk';
 import { APIError as GroqAPIError } from 'groq-sdk';
 import { createServer } from '../../index';
 import { resetForTesting } from '../../routing/provider-state';
+import type { AudioTranscriptionResult } from '../../types';
+import type { WhisperService } from '../../whisper-service';
 import { makeMockAdapter, resetMockAdapter } from './mock-adapters';
 import type { MockAdapter } from './mock-adapters';
 
 // Read proxy key from .env.test (loaded by bun test) — never hardcode
 const PROXY_KEY = process.env['PERSONAL_PROXY_API_KEY']!;
 
+type MockWhisperService = WhisperService & { transcribeMock: ReturnType<typeof mock> };
+
 let server: ReturnType<typeof createServer>;
+let audioServer: ReturnType<typeof createServer>;
+let tinyServer: ReturnType<typeof createServer>;
 let mockCerebras: MockAdapter;
 let mockGroq: MockAdapter;
+let mockWhisper: MockWhisperService;
+
+function makeMockWhisperService(): MockWhisperService {
+    const transcribeMock = mock(async (_file: File, _alias: string): Promise<AudioTranscriptionResult> => ({
+        text: 'mock transcript',
+    }));
+    return {
+        transcribe: transcribeMock,
+        transcribeMock,
+    };
+}
 
 beforeAll(() => {
     mockCerebras = makeMockAdapter('cerebras');
     mockGroq = makeMockAdapter('groq');
+    mockWhisper = makeMockWhisperService();
     // port 0 = OS-assigned free port; read back via server.port
     server = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0);
+    audioServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper);
+    // TEST2-04: inject 100-byte file limit without lowering global transport ceiling
+    tinyServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper, 100);
 });
 
 afterAll(() => {
     server.stop(true);
+    audioServer.stop(true);
+    tinyServer.stop(true);
 });
 
 beforeEach(() => {
@@ -34,6 +57,10 @@ beforeEach(() => {
     // Restore default mock implementations after TEST-05's persistent overrides
     resetMockAdapter(mockCerebras);
     resetMockAdapter(mockGroq);
+    mockWhisper.transcribeMock.mockReset();
+    mockWhisper.transcribeMock.mockImplementation(async (_f: File, _a: string): Promise<AudioTranscriptionResult> => ({
+        text: 'mock transcript',
+    }));
 });
 
 afterEach(() => {
@@ -55,6 +82,25 @@ async function post(body: object, extraHeaders?: Record<string, string>): Promis
             ...extraHeaders,
         },
         body: JSON.stringify(body),
+    });
+}
+
+function audioUrl(path: string): string {
+    return `http://127.0.0.1:${audioServer.port}${path}`;
+}
+
+async function postAudio(fields: Record<string, string | File>, extraHeaders?: Record<string, string>): Promise<Response> {
+    const formData = new FormData();
+    for (const [key, value] of Object.entries(fields)) {
+        formData.append(key, value);
+    }
+    return fetch(audioUrl('/v1/audio/transcriptions'), {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${PROXY_KEY}`,
+            ...extraHeaders,
+        },
+        body: formData,
     });
 }
 
@@ -422,6 +468,84 @@ describe('Integration: routing and streaming tests', () => {
         if (res.status === 413) {
             expect((await res.json() as any).error?.code).toBe('request_too_large');
         }
+    });
+
+});
+
+describe('Integration: audio transcription tests', () => {
+
+    test('TEST2-01: missing auth returns 401 with X-Request-ID', async () => {
+        const res = await fetch(audioUrl('/v1/audio/transcriptions'), { method: 'POST' });
+        expect(res.status).toBe(401);
+        expect(res.headers.get('X-Request-ID')).toBeTruthy();
+        const body = await res.json() as { error?: { type?: string } };
+        expect(body.error?.type).toBeDefined();
+    });
+
+    test('TEST2-02: missing file field returns 400', async () => {
+        const res = await postAudio({ model: 'whisper-1' });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { param?: string; code?: string } };
+        expect(body.error?.param === 'file' || body.error?.code).toBeTruthy();
+    });
+
+    test('TEST2-03: unknown model alias returns 400 model_not_found', async () => {
+        const res = await postAudio({
+            model: 'unknown-model',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('model_not_found');
+    });
+
+    test('TEST2-04: oversized file returns 413', async () => {
+        const bigFile = new File([new Uint8Array(101)], 'big.mp3', { type: 'audio/mpeg' });
+        const formData = new FormData();
+        formData.append('model', 'whisper-1');
+        formData.append('file', bigFile);
+        const res = await fetch(`http://127.0.0.1:${tinyServer.port}/v1/audio/transcriptions`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${PROXY_KEY}` },
+            body: formData,
+        });
+        expect(res.status).toBe(413);
+    });
+
+    test('TEST2-05: unknown field language returns 400', async () => {
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+            language: 'en',
+        } as Record<string, string | File>);
+        expect(res.status).toBe(400);
+    });
+
+    test('TEST2-06: successful transcription returns 200 with text only', async () => {
+        mockWhisper.transcribeMock.mockImplementationOnce(async () => ({ text: 'hello world' }));
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['hello audio'], 'test.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { text?: string };
+        expect(body.text).toBe('hello world');
+        expect(Object.keys(body).length).toBe(1);
+        expect(res.headers.get('X-Request-ID')).toBeTruthy();
+    });
+
+    test('TEST2-07: transcribe failure returns 503 service_unavailable', async () => {
+        mockWhisper.transcribeMock.mockImplementationOnce(async () => {
+            throw new Error('connection refused');
+        });
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(503);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error).toBeDefined();
+        expect(body.error?.code).toBe('service_unavailable');
     });
 
 });
