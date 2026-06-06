@@ -25,4 +25,15 @@ export const config = {
     modelRegistryJson: process.env["MODEL_REGISTRY_JSON"]
         ?? `{"gpt-oss-120b-balanced":{"cerebras":"gpt-oss-120b","groq":"openai/gpt-oss-120b"}}`,
     logLevel: process.env["LOG_LEVEL"] ?? "info",
+
+    // WHSP-04: whisper sidecar connection
+    whisperHost: process.env["WHISPER_HOST"] ?? "127.0.0.1",
+    whisperPort: Number(process.env["WHISPER_PORT"] ?? 8080),
+    whisperTimeoutMs: Number(process.env["WHISPER_TIMEOUT_MS"] ?? 30_000),
+    // optional() returns null when unset — missing WHISPER_MODEL_ALIAS is non-fatal
+    whisperModelAlias: optional("WHISPER_MODEL_ALIAS"),
+
+    // AUDIO-03 + WHSP-05: file and body size limits
+    audioMaxFileBytes: Number(process.env["AUDIO_MAX_FILE_BYTES"] ?? 26_214_400),   // 25 MiB
+    maxRequestBodyBytes: Number(process.env["MAX_REQUEST_BODY_BYTES"] ?? 1_048_576), // 1 MiB for chat JSON
 } as const;
