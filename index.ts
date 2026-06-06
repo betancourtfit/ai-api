@@ -306,7 +306,9 @@ export function createServer(
                 };
 
                 const candidates = chooseEligibleProviders(input.model);
-                advanceCursor();
+                // WR-02: do NOT advance cursor unconditionally here — cursor is advanced after
+                // each failed provider attempt so that on recovery the next request starts from
+                // the provider after the one that last failed, not from a stale pre-eligibility-check position.
 
                 if (candidates.length === 0) {
                     log('info', {
@@ -353,10 +355,14 @@ export function createServer(
                             sdkStream = await adapter.stream(upstreamModelId, params, controller.signal);
                             chosenProvider = provider;
                             chosenUpstreamModelId = upstreamModelId;
+                            advanceCursor(); // WR-02: advance after successful selection for next request's round-robin
                             break;
                         } catch (err) {
                             const classified = classifyError(err);
                             recordFailure(provider, classified.status ?? 0);
+                            // WR-02: advance cursor after each failed attempt so the next request
+                            // does not restart from the same failing provider.
+                            advanceCursor();
 
                             if (!classified.shouldFailover) {
                                 // D-07: pass upstream error message through with model-ID de-leaking
@@ -559,6 +565,7 @@ export function createServer(
 
                         setRateLimitSnapshot(provider, snapshot);
                         recordSuccess(provider, 200);
+                        advanceCursor(); // WR-02: advance after successful selection for next request's round-robin
 
                         // D-08: warn when upstream omits usage
                         if (result.usage === undefined) {
@@ -597,6 +604,9 @@ export function createServer(
                     } catch (err) {
                         const classified = classifyError(err);
                         recordFailure(provider, classified.status ?? 0);
+                        // WR-02: advance cursor after each failed attempt so the next request
+                        // does not restart from the same failing provider.
+                        advanceCursor();
 
                         if (!classified.shouldFailover) {
                             // D-07: pass upstream error message through with model-ID de-leaking
