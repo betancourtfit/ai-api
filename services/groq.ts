@@ -28,7 +28,7 @@ export const groqAdapter: ProviderAdapter = {
         const { data, response } = await client.chat.completions.create({
             model: upstreamModelId,
             messages: params.messages,
-            temperature: params.temperature ?? undefined,
+            temperature: params.temperature === 0 ? 1e-8 : (params.temperature ?? undefined), // WR-03: Groq rejects temperature=0; convert to 1e-8 per CLAUDE.md §11
             top_p: params.top_p ?? undefined,
             max_completion_tokens: params.max_completion_tokens,
             stop: params.stop ?? undefined,
@@ -69,7 +69,7 @@ export const groqAdapter: ProviderAdapter = {
         const sdkStream = await client.chat.completions.create({
             model: upstreamModelId,
             messages: params.messages,
-            temperature: params.temperature ?? undefined,
+            temperature: params.temperature === 0 ? 1e-8 : (params.temperature ?? undefined), // WR-03: Groq rejects temperature=0; convert to 1e-8 per CLAUDE.md §11
             top_p: params.top_p ?? undefined,
             max_completion_tokens: params.max_completion_tokens,
             stop: params.stop ?? undefined,
