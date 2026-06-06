@@ -55,7 +55,10 @@ Drop-in OpenAI replacement: any fetch already wired to OpenAI works unchanged af
 
 ### Active
 
-(none — all v1 requirements validated; milestone ready for completion)
+- Audio config env vars (`WHISPER_*`, `AUDIO_MAX_FILE_BYTES`), `AudioTranscriptionResult` type, `audio-schema.ts` Zod validator — Validated in Phase 4: Audio Foundation
+- `maxRequestBodySize` raised to 25 MiB audio ceiling in `Bun.serve()` — Validated in Phase 4: Audio Foundation
+- Chat 1 MiB body gate enforced on actual buffered bytes via `Buffer.byteLength(raw)` — CR-01 closed — Validated in Phase 4: Audio Foundation
+- Regression tests TEST-13/14/15 for body gate bypass paths (chunked, NaN-header, understated-header) — Validated in Phase 4: Audio Foundation
 
 ### Out of Scope
 
@@ -116,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after Phase 3 (Full Compliance + Tests) completion — all v1 phases complete*
+*Last updated: 2026-06-06 after Phase 4 (Audio Foundation) completion — audio config/types/schema foundation laid; chat body gate hardened*
