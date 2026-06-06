@@ -491,7 +491,7 @@ export interface AudioTranscriptionResult {
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `validateAudioTranscription` accept a model alias that does not exist in the whisper model registry?**
    - What we know: AUDIO-02 says "validate model matches a known whisper alias" — but the whisper alias registry does not exist yet (Phase 6 builds it). The audio schema validator only knows about `z.string()` for model; alias lookup is done after schema validation, matching the chat pattern (`isKnownAlias()` called in the route handler after `validateChatCompletion` passes).
