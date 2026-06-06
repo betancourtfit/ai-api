@@ -200,7 +200,12 @@ export function createServer(
                     ));
                 }
 
-                // Read raw body and enforce actual byte length — prevents chunked/NaN/understated bypass
+                // Read raw body and enforce actual byte length — prevents chunked/NaN bypass.
+                // Known Bun behavior (UAT-04-05): when a client sends Content-Length: N (understated)
+                // with a body larger than N bytes, Bun reads only N bytes before returning from
+                // request.text(). JSON.parse then fails → 400, not 413. The security property holds
+                // (request rejected) but the status code is wrong for the understated-header path.
+                // Fix requires a streaming read with a byte counter instead of request.text().
                 let raw: string;
                 try {
                     raw = await request.text();
