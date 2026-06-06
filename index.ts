@@ -98,6 +98,8 @@ export function createServer(
     return Bun.serve({
         hostname: config.hostname,
         port,
+        // WHSP-05: raise global body gate to audio ceiling (25 MiB); chat 1 MiB limit enforced in handler
+        maxRequestBodySize: config.audioMaxFileBytes,
         async fetch(request, server) {
             // OBS-01: generate request ID at the very top — attached to every response
             const requestId = crypto.randomUUID();
@@ -185,6 +187,18 @@ export function createServer(
 
             // POST /v1/chat/completions — main non-streaming completion endpoint
             if (request.method === 'POST' && pathname === '/v1/chat/completions') {
+                // WHSP-05: enforce 1 MiB chat limit explicitly (maxRequestBodySize is set to audio ceiling)
+                const contentLength = Number(request.headers.get('content-length') ?? 0);
+                if (contentLength > config.maxRequestBodyBytes) {
+                    return withRequestId(openaiError(
+                        `Request body too large. Maximum is ${config.maxRequestBodyBytes} bytes.`,
+                        'invalid_request_error',
+                        'request_too_large',
+                        null,
+                        413
+                    ));
+                }
+
                 // Parse JSON body
                 let body: unknown;
                 try {

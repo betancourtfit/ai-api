@@ -53,3 +53,8 @@ export interface ProviderAdapter {
     complete(upstreamModelId: string, params: CompletionParams): Promise<CompletionOutcome>;
     stream(upstreamModelId: string, params: CompletionParams, signal: AbortSignal): Promise<AsyncIterable<StreamChunk>>;
 }
+
+// AUDIO-06: OpenAI json transcription response shape
+export interface AudioTranscriptionResult {
+    text: string;
+}
