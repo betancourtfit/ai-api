@@ -3,6 +3,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { config } from './config';
 import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
+import { validateAudioFileSize, validateAudioTranscription } from './audio-schema';
 import { validateChatCompletion } from './request-schema';
 import { calcCooldownMs, classifyError, parseCerebrasHeaders, parseGroqHeaders } from './routing/cooldown-manager';
 import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure } from './routing/provider-state';
@@ -10,6 +11,8 @@ import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
 import { normalizeChunk, normalizeResponse } from './response-normalizer';
+import { NoopWhisperService } from './whisper-service';
+import type { WhisperService } from './whisper-service';
 import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
 
@@ -100,7 +103,8 @@ function hasVisibleChunkData(chunk: StreamChunk): boolean {
 // D-02: exported factory — importing index.ts does NOT bind a port
 export function createServer(
     adapters: Record<Provider, ProviderAdapter>,
-    port: number = config.port
+    port: number = config.port,
+    whisperService: WhisperService = new NoopWhisperService()
 ): ReturnType<typeof Bun.serve> {
     return Bun.serve({
         hostname: config.hostname,
@@ -162,6 +166,97 @@ export function createServer(
                     null,
                     401
                 ));
+            }
+
+            // POST /v1/audio/transcriptions — multipart transcription endpoint (EP2-01)
+            if (request.method === 'POST' && pathname === '/v1/audio/transcriptions') {
+                let formData: FormData;
+                try {
+                    formData = await request.formData();
+                } catch {
+                    return withRequestId(openaiError(
+                        'Failed to parse multipart form data.',
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        null,
+                        400
+                    ));
+                }
+
+                const rawInput: Record<string, unknown> = {};
+                for (const [key, value] of formData.entries()) {
+                    rawInput[key] = value;
+                }
+
+                const validation = validateAudioTranscription(rawInput);
+                if (!validation.success) {
+                    return withRequestId(openaiError(
+                        validation.message,
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        validation.param,
+                        400
+                    ));
+                }
+
+                const input = validation.data;
+
+                const sizeCheck = validateAudioFileSize(input.file, config.audioMaxFileBytes);
+                if (!sizeCheck.ok) {
+                    return withRequestId(openaiError(
+                        sizeCheck.message,
+                        'invalid_request_error',
+                        'request_too_large',
+                        'file',
+                        413
+                    ));
+                }
+
+                const isKnownWhisperAlias = config.whisperModelAlias !== null
+                    && input.model === config.whisperModelAlias;
+                if (!isKnownWhisperAlias) {
+                    return withRequestId(openaiError(
+                        `Unknown model '${input.model}'.`,
+                        'invalid_request_error',
+                        'model_not_found',
+                        'model',
+                        400
+                    ));
+                }
+
+                try {
+                    const result = await whisperService.transcribe(input.file, input.model);
+                    log('info', {
+                        event: 'transcription_complete',
+                        requestId,
+                        timestamp: new Date(requestStart).toISOString(),
+                        route: `${request.method} ${pathname}`,
+                        modelAlias: input.model,
+                        fileSize: input.file.size,
+                        status: 200,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(new Response(JSON.stringify(result), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    }));
+                } catch {
+                    log('warn', {
+                        event: 'transcription_failed',
+                        requestId,
+                        modelAlias: input.model,
+                        fileSize: input.file.size,
+                        status: 503,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(openaiError(
+                        'Transcription service is unavailable.',
+                        'server_error',
+                        'service_unavailable',
+                        null,
+                        503
+                    ));
+                }
             }
 
             if (request.method === 'GET' && pathname === '/internal/providers/status') {
