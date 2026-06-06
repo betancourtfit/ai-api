@@ -22,7 +22,7 @@ function requiredPositiveInt(name: string, fallback: number): number {
 }
 
 export const config = {
-    port: Number(process.env["PORT"] ?? 3000),
+    port: requiredPositiveInt("PORT", 3000),
     hostname: process.env["HOSTNAME"] ?? "0.0.0.0",
     personalProxyApiKey: optional("PERSONAL_PROXY_API_KEY"),
     cerebrasApiKey: optional("CEREBRAS_API_KEY"),
@@ -30,7 +30,7 @@ export const config = {
     cerebrasBaseUrl: process.env["CEREBRAS_BASE_URL"] ?? "https://api.cerebras.ai/v1",
     groqBaseUrl: process.env["GROQ_BASE_URL"] ?? "https://api.groq.com/openai/v1",
     cerebrasVersionPatch: process.env["CEREBRAS_VERSION_PATCH"] ?? "2",
-    defaultMaxCompletionTokens: Number(process.env["DEFAULT_MAX_COMPLETION_TOKENS"] ?? 4096),
+    defaultMaxCompletionTokens: requiredPositiveInt("DEFAULT_MAX_COMPLETION_TOKENS", 4096),
     defaultCooldownSeconds: requiredPositiveInt("DEFAULT_COOLDOWN_SECONDS", 60),
     maxProviderAttemptsPerRequest: requiredPositiveInt("MAX_PROVIDER_ATTEMPTS_PER_REQUEST", 2),
     exposeProviderHeader: (process.env["EXPOSE_PROVIDER_HEADER"] ?? "false") === "true",
