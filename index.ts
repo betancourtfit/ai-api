@@ -104,13 +104,14 @@ function hasVisibleChunkData(chunk: StreamChunk): boolean {
 export function createServer(
     adapters: Record<Provider, ProviderAdapter>,
     port: number = config.port,
-    whisperService: WhisperService = new NoopWhisperService()
+    whisperService: WhisperService = new NoopWhisperService(),
+    audioMaxFileBytes: number = config.audioMaxFileBytes
 ): ReturnType<typeof Bun.serve> {
     return Bun.serve({
         hostname: config.hostname,
         port,
-        // WHSP-05: raise global body gate to audio ceiling (25 MiB); chat 1 MiB limit enforced in handler
-        maxRequestBodySize: config.audioMaxFileBytes,
+        // WHSP-05: transport gate = max(audio ceiling, chat ceiling); per-route limits enforced in handlers
+        maxRequestBodySize: Math.max(config.audioMaxFileBytes, config.maxRequestBodyBytes),
         async fetch(request, server) {
             // OBS-01: generate request ID at the very top — attached to every response
             const requestId = crypto.randomUUID();
@@ -201,7 +202,7 @@ export function createServer(
 
                 const input = validation.data;
 
-                const sizeCheck = validateAudioFileSize(input.file, config.audioMaxFileBytes);
+                const sizeCheck = validateAudioFileSize(input.file, audioMaxFileBytes);
                 if (!sizeCheck.ok) {
                     return withRequestId(openaiError(
                         sizeCheck.message,
