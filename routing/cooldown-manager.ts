@@ -51,7 +51,8 @@ export function calcCooldownMs(
         defaultCooldownSeconds,
         parsed.retryAfterSeconds ?? 0,
         parsed.resetTokensMinuteSeconds ?? 0,
-        parsed.resetTokensSeconds ?? 0
+        parsed.resetTokensSeconds ?? 0,
+        parsed.resetRequestsDaySeconds ?? 0,   // CR-02: was parsed but omitted — daily-quota 429s need full reset window
     );
 
     return Math.round(seconds * 1000);
