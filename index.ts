@@ -200,26 +200,57 @@ export function createServer(
                     ));
                 }
 
-                // Read raw body and enforce actual byte length — prevents chunked/NaN bypass.
-                // Known Bun behavior (UAT-04-05): when a client sends Content-Length: N (understated)
-                // with a body larger than N bytes, Bun reads only N bytes before returning from
-                // request.text(). JSON.parse then fails → 400, not 413. The security property holds
-                // (request rejected) but the status code is wrong for the understated-header path.
-                // Fix requires a streaming read with a byte counter instead of request.text().
+                // Read raw body via ReadableStream — Content-Length header cannot be trusted.
+                // request.text() honors the declared Content-Length and may deliver fewer bytes
+                // than the actual wire payload when the header is understated (UAT-04-05).
+                // A streaming read with a running byte counter measures actual wire bytes
+                // independently of any Content-Length value.
                 let raw: string;
                 try {
-                    raw = await request.text();
+                    if (!request.body) {
+                        return withRequestId(openaiError('Failed to read request body.', 'invalid_request_error', 'invalid_request_error', null, 400));
+                    }
+                    const reader = request.body.getReader();
+                    const chunks: Uint8Array[] = [];
+                    let runningTotal = 0;
+                    let limitExceeded = false;
+
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            runningTotal += value.byteLength;
+                            if (runningTotal > config.maxRequestBodyBytes) {
+                                limitExceeded = true;
+                                await reader.cancel();
+                                break;
+                            }
+                            chunks.push(value);
+                        }
+                    } catch {
+                        return withRequestId(openaiError('Failed to read request body.', 'invalid_request_error', 'invalid_request_error', null, 400));
+                    }
+
+                    if (limitExceeded) {
+                        return withRequestId(openaiError(
+                            `Request body too large. Maximum is ${config.maxRequestBodyBytes} bytes.`,
+                            'invalid_request_error',
+                            'request_too_large',
+                            null,
+                            413
+                        ));
+                    }
+
+                    // Combine accumulated Uint8Array chunks into a single buffer and decode
+                    const combined = new Uint8Array(runningTotal);
+                    let offset = 0;
+                    for (const chunk of chunks) {
+                        combined.set(chunk, offset);
+                        offset += chunk.byteLength;
+                    }
+                    raw = new TextDecoder().decode(combined);
                 } catch {
                     return withRequestId(openaiError('Failed to read request body.', 'invalid_request_error', 'invalid_request_error', null, 400));
-                }
-                if (Buffer.byteLength(raw) > config.maxRequestBodyBytes) {
-                    return withRequestId(openaiError(
-                        `Request body too large. Maximum is ${config.maxRequestBodyBytes} bytes.`,
-                        'invalid_request_error',
-                        'request_too_large',
-                        null,
-                        413
-                    ));
                 }
 
                 // Parse JSON body from already-buffered raw string
