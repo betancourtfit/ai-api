@@ -15,7 +15,10 @@ import type { MockAdapter } from './mock-adapters';
 // Read proxy key from .env.test (loaded by bun test) — never hardcode
 const PROXY_KEY = process.env['PERSONAL_PROXY_API_KEY']!;
 
-type MockWhisperService = WhisperService & { transcribeMock: ReturnType<typeof mock> };
+type MockWhisperService = WhisperService & {
+    transcribeMock: ReturnType<typeof mock>;
+    healthMock: ReturnType<typeof mock>;
+};
 
 let server: ReturnType<typeof createServer>;
 let audioServer: ReturnType<typeof createServer>;
@@ -28,9 +31,12 @@ function makeMockWhisperService(): MockWhisperService {
     const transcribeMock = mock(async (_file: File, _alias: string): Promise<AudioTranscriptionResult> => ({
         text: 'mock transcript',
     }));
+    const healthMock = mock(async (): Promise<boolean> => true);
     return {
         transcribe: transcribeMock,
+        health: healthMock,
         transcribeMock,
+        healthMock,
     };
 }
 
@@ -61,6 +67,8 @@ beforeEach(() => {
     mockWhisper.transcribeMock.mockImplementation(async (_f: File, _a: string): Promise<AudioTranscriptionResult> => ({
         text: 'mock transcript',
     }));
+    mockWhisper.healthMock.mockReset();
+    mockWhisper.healthMock.mockImplementation(async () => true);
 });
 
 afterEach(() => {
@@ -546,6 +554,53 @@ describe('Integration: audio transcription tests', () => {
         const body = await res.json() as { error?: { code?: string } };
         expect(body.error).toBeDefined();
         expect(body.error?.code).toBe('service_unavailable');
+    });
+
+    test('EP2-02: GET /v1/models includes whisper alias and chat aliases', async () => {
+        const res = await fetch(audioUrl('/v1/models'), {
+            headers: { Authorization: `Bearer ${PROXY_KEY}` },
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { data?: Array<{ id: string }> };
+        const ids = (body.data ?? []).map((m) => m.id);
+        expect(ids).toContain('whisper-1');
+        expect(ids).toContain('gpt-oss-120b-balanced');
+    });
+
+    test('EP2-03: GET /ready whisperAvailable true when health mock succeeds', async () => {
+        mockWhisper.healthMock.mockImplementationOnce(async () => true);
+        const res = await fetch(audioUrl('/ready'));
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+            whisperAvailable?: boolean;
+            ready?: boolean;
+            mode?: string;
+            eligibleProviders?: string[];
+            unavailableProviders?: string[];
+        };
+        expect(body.whisperAvailable).toBe(true);
+        expect(body.ready).toBeDefined();
+        expect(body.mode).toBeDefined();
+        expect(Array.isArray(body.eligibleProviders)).toBe(true);
+        expect(Array.isArray(body.unavailableProviders)).toBe(true);
+    });
+
+    test('EP2-03: GET /ready whisperAvailable false without affecting chat readiness', async () => {
+        mockWhisper.healthMock.mockImplementationOnce(async () => false);
+        const res = await fetch(audioUrl('/ready'));
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+            whisperAvailable?: boolean;
+            ready?: boolean;
+            mode?: string;
+            eligibleProviders?: string[];
+            unavailableProviders?: string[];
+        };
+        expect(body.whisperAvailable).toBe(false);
+        expect(body.ready).toBeDefined();
+        expect(body.mode).toBeDefined();
+        expect(Array.isArray(body.eligibleProviders)).toBe(true);
+        expect(Array.isArray(body.unavailableProviders)).toBe(true);
     });
 
 });

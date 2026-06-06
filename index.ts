@@ -11,7 +11,7 @@ import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
 import { normalizeChunk, normalizeResponse } from './response-normalizer';
-import { NoopWhisperService } from './whisper-service';
+import { HttpWhisperService, NoopWhisperService } from './whisper-service';
 import type { WhisperService } from './whisper-service';
 import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
@@ -143,9 +143,10 @@ export function createServer(
                 const mode = !proxyKeyConfigured
                     ? 'not_configured'
                     : unavailableProviders.length === 0 ? 'ok' : 'degraded';
+                const whisperAvailable = await whisperService.health();
 
                 return withRequestId(new Response(
-                    JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders }),
+                    JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders, whisperAvailable }),
                     {
                         status: ready ? 200 : 503,
                         headers: { 'Content-Type': 'application/json' },
@@ -272,18 +273,24 @@ export function createServer(
                 ));
             }
 
-            // GET /v1/models — list logical proxy aliases only (REG-04; EP-03)
+            // GET /v1/models — list logical proxy aliases only (REG-04; EP-03; EP2-02)
             if (request.method === 'GET' && pathname === '/v1/models') {
+                const data = listAliases().map((id) => ({
+                    id,
+                    object: 'model',
+                    created: 0,
+                    owned_by: 'personal-proxy',
+                }));
+                if (config.whisperModelAlias !== null) {
+                    data.push({
+                        id: config.whisperModelAlias,
+                        object: 'model',
+                        created: 0,
+                        owned_by: 'personal-proxy',
+                    });
+                }
                 return withRequestId(new Response(
-                    JSON.stringify({
-                        object: 'list',
-                        data: listAliases().map((id) => ({
-                            id,
-                            object: 'model',
-                            created: 0,
-                            owned_by: 'personal-proxy',
-                        })),
-                    }),
+                    JSON.stringify({ object: 'list', data }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
                 ));
             }
@@ -784,6 +791,13 @@ export function createServer(
 
 // Entrypoint guard — bun index.ts boots the server; import { createServer } from './index' does not
 if (import.meta.main) {
-    const server = createServer({ cerebras: cerebrasAdapter, groq: groqAdapter });
+    const whisperService = config.whisperModelAlias !== null
+        ? new HttpWhisperService()
+        : new NoopWhisperService();
+    const server = createServer(
+        { cerebras: cerebrasAdapter, groq: groqAdapter },
+        config.port,
+        whisperService
+    );
     console.log(`Server is running on ${server.url}`);
 }
