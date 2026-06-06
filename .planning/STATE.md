@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-current_phase: 03
-current_plan: Not started
-status: completed
-last_updated: "2026-06-05T23:28:08.172Z"
+milestone: v2.0
+milestone_name: Local Audio Transcription
+status: planning
+last_updated: "2026-06-06T13:27:38.707Z"
+last_activity: 2026-06-06
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 7
-  completed_plans: 7
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # State: bun-ai-api OpenAI-Compatible Proxy Refactor
@@ -24,14 +23,10 @@ progress:
 
 ## Current Position
 
-**Status:** Milestone complete — all phases UAT verified
-**Progress:** 3 of 3 phases complete
-
-```
-[==========] Phase 1: Foundation              — Complete ✓ UAT
-[==========] Phase 2: Routing + Streaming     — Complete ✓ UAT
-[==========] Phase 3: Full Compliance + Tests — Complete ✓ UAT
-```
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-06-06 — Milestone v2.0 started
 
 ## Performance Metrics
 

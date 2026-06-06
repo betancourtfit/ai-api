@@ -1,5 +1,18 @@
 # bun-ai-api — OpenAI-Compatible Proxy for Cerebras + Groq
 
+## Current Milestone: v2.0 Local Audio Transcription
+
+**Goal:** Add an OpenAI-compatible `POST /v1/audio/transcriptions` endpoint that transcribes audio locally via Whisper running on the user's PC — drop-in replacement requiring only `base_url` and API key changes.
+
+**Target features:**
+- `POST /v1/audio/transcriptions` — OpenAI multipart/form-data wire contract
+- Local Whisper inference (whisper.cpp or faster-whisper via Bun subprocess)
+- OpenAI-shaped transcription response (`{ text: "..." }` and verbose format)
+- Same Bearer auth as existing proxy (PERSONAL_PROXY_API_KEY)
+- `GET /v1/audio/models` or model parameter passthrough (optional)
+
+---
+
 ## What This Is
 
 Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) and routes requests across two upstream inference providers: Cerebras and Groq. Existing clients switch from direct OpenAI calls by changing only `base_url` and API key — no other code changes. The refactor transforms a prototype custom-endpoint server into a spec-compliant proxy with stateful round-robin routing, cooldown management, and full OpenAI wire compatibility.
