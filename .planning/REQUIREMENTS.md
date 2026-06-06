@@ -64,6 +64,38 @@
 
 ---
 
+## v2.0 Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| AUDIO-01 | Phase 4 | Pending |
+| AUDIO-02 | Phase 4 | Pending |
+| AUDIO-03 | Phase 4 | Pending |
+| AUDIO-04 | Phase 4 | Pending |
+| AUDIO-05 | Phase 4 | Pending |
+| AUDIO-06 | Phase 4 | Pending |
+| WHSP-04 | Phase 4 | Pending |
+| WHSP-05 | Phase 4 | Pending |
+| EP2-01 | Phase 5 | Pending |
+| AUTH2-01 | Phase 5 | Pending |
+| AUTH2-02 | Phase 5 | Pending |
+| OBS2-01 | Phase 5 | Pending |
+| OBS2-02 | Phase 5 | Pending |
+| TEST2-01 | Phase 5 | Pending |
+| TEST2-02 | Phase 5 | Pending |
+| TEST2-03 | Phase 5 | Pending |
+| TEST2-04 | Phase 5 | Pending |
+| TEST2-05 | Phase 5 | Pending |
+| TEST2-06 | Phase 5 | Pending |
+| TEST2-07 | Phase 5 | Pending |
+| EP2-02 | Phase 6 | Pending |
+| EP2-03 | Phase 6 | Pending |
+| WHSP-01 | Phase 6 | Pending |
+| WHSP-02 | Phase 6 | Pending |
+| WHSP-03 | Phase 6 | Pending |
+
+---
+
 ## v1.0 Validated Requirements
 
 All 76 v1.0 requirements validated:
@@ -86,4 +118,4 @@ All 76 v1.0 requirements validated:
 ---
 
 *Requirements initialized: 2026-06-04 (v1.0)*
-*Updated: 2026-06-06 — v2.0 Local Audio Transcription (21 requirements across 7 categories)*
+*Updated: 2026-06-06 — v2.0 Local Audio Transcription (25 requirements across 7 categories, traceability table added)*

@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Local Audio Transcription
 status: planning
-last_updated: "2026-06-06T13:27:38.707Z"
+last_updated: "2026-06-06T00:00:00.000Z"
 last_activity: 2026-06-06
 progress:
-  total_phases: 0
+  total_phases: 3
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -23,17 +23,19 @@ progress:
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 4 — Audio Foundation
 Plan: —
-Status: Defining requirements
-Last activity: 2026-06-06 — Milestone v2.0 started
+Status: Planning
+Last activity: 2026-06-06 — Milestone v2.0 roadmap created (Phases 4–6)
+
+Progress bar: ░░░░░░░░░░ 0% (0/3 phases)
 
 ## Performance Metrics
 
-- Plans completed: 7
-- Plans total: 7
-- Requirements mapped: 76/76
-- Phases complete: 3/3
+- Plans completed: 7 (v1.0)
+- Plans total: 7 (v1.0) + TBD (v2.0)
+- Requirements mapped: 76/76 (v1.0) + 25/25 (v2.0)
+- Phases complete: 3/3 (v1.0) + 0/3 (v2.0)
 
 ## Accumulated Context
 
@@ -48,6 +50,11 @@ Last activity: 2026-06-06 — Milestone v2.0 started
 - Zod v4 for validation — explicit dependency on INFRA-04
 - Missing secrets should not crash startup — configuration gaps surface via `/ready` and protected-route errors instead
 - Stream relay should suppress normalized no-op chunks and tolerate SDK error headers exposed as plain objects
+- **v2.0:** whisper-server HTTP sidecar (not subprocess) — cleaner lifecycle, no SIGCHLD handling, avoids binary bundling
+- **v2.0:** Zero new npm packages — all sidecar communication via native `fetch()` + `FormData`
+- **v2.0:** Phase 4 gates: all tests pass without whisper binary installed — schema/config work is self-contained
+- **v2.0:** Phase 5 gates: 100% TEST2-xx coverage against mocked WhisperService before touching real binary
+- **v2.0:** maxRequestBodySize raised to audio limit in Bun.serve(); chat-completion 1 MiB limit enforced at validation layer
 
 ### Todos
 
@@ -59,10 +66,10 @@ None
 
 ## Session Continuity
 
-**Last action:** Phase 3 UAT complete — 9/9 passed (2026-06-05)
-**Next action:** Milestone v1.0 complete. Ship or extend scope.
+**Last action:** v2.0 roadmap created — Phases 4, 5, 6 defined with 25 requirements mapped
+**Next action:** Run `/gsd:plan-phase 4` to decompose Phase 4 into executable plans
 
 ---
 
 *State initialized: 2026-06-04*
-*Last updated: 2026-06-05 after Phase 2 completion*
+*Last updated: 2026-06-06 — v2.0 milestone roadmap complete; Phase 4 is next*
