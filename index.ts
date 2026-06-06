@@ -400,6 +400,16 @@ export function createServer(
 
                         try {
                             for await (const chunk of sdkStream) {
+                                // WR-02: capture usage from terminal chunk (choices:[], usage:{...})
+                                // before the hasVisibleChunkData check discards it.
+                                const rawChunk = chunk as Record<string, unknown>;
+                                if (rawChunk['usage'] &&
+                                        Array.isArray(rawChunk['choices']) &&
+                                        (rawChunk['choices'] as unknown[]).length === 0) {
+                                    streamUsage = rawChunk['usage'];
+                                    continue; // terminal usage chunk — not forwarded downstream
+                                }
+
                                 const normalized = normalizeChunk(chunk, input.model);
                                 if (!hasVisibleChunkData(normalized)) {
                                     continue;
