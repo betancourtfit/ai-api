@@ -145,7 +145,7 @@ Plans:
 | 1. Foundation | 2/2 | Complete | 2026-06-05 |
 | 2. Routing + Streaming | 2/2 | Complete | 2026-06-05 |
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
-| 4. Audio Foundation | 2/2 | Complete   | 2026-06-06 |
+| 4. Audio Foundation | 2/2 | Complete    | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 0/? | Not started | - |
 | 6. Whisper Sidecar + Models + Ready | 0/? | Not started | - |
 

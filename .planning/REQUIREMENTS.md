@@ -14,20 +14,20 @@
 
 ### Audio Handling
 
-- [ ] **AUDIO-01**: Proxy validates `file` field is present in multipart body; returns OpenAI-shaped 400 if missing
-- [ ] **AUDIO-02**: Proxy validates `model` matches a known whisper alias; returns OpenAI-shaped 400 if unknown
-- [ ] **AUDIO-03**: Proxy enforces 25 MB file size limit; returns OpenAI-shaped 413 if exceeded
-- [ ] **AUDIO-04**: Proxy accepts `response_format` field in request (v2.0 always returns json format)
-- [ ] **AUDIO-05**: Proxy rejects unknown/unsupported request fields with OpenAI-shaped 400
-- [ ] **AUDIO-06**: Successful response body is `{ "text": "..." }` — OpenAI json transcription shape
+- [x] **AUDIO-01**: Proxy validates `file` field is present in multipart body; returns OpenAI-shaped 400 if missing
+- [x] **AUDIO-02**: Proxy validates `model` matches a known whisper alias; returns OpenAI-shaped 400 if unknown
+- [x] **AUDIO-03**: Proxy enforces 25 MB file size limit; returns OpenAI-shaped 413 if exceeded
+- [x] **AUDIO-04**: Proxy accepts `response_format` field in request (v2.0 always returns json format)
+- [x] **AUDIO-05**: Proxy rejects unknown/unsupported request fields with OpenAI-shaped 400
+- [x] **AUDIO-06**: Successful response body is `{ "text": "..." }` — OpenAI json transcription shape
 
 ### Whisper Integration
 
 - [ ] **WHSP-01**: Proxy forwards validated transcription request to local whisper-server via HTTP fetch
 - [ ] **WHSP-02**: Whisper model alias configured via `WHISPER_MODEL_ALIAS` env var; maps to sidecar model
 - [ ] **WHSP-03**: When whisper-server is unreachable, proxy returns OpenAI-shaped 503; chat completions remain unaffected
-- [ ] **WHSP-04**: `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, `AUDIO_MAX_FILE_BYTES` env vars respected by config
-- [ ] **WHSP-05**: `maxRequestBodySize` in Bun.serve raised to accommodate audio files separate from 1 MiB chat limit
+- [x] **WHSP-04**: `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, `AUDIO_MAX_FILE_BYTES` env vars respected by config
+- [x] **WHSP-05**: `maxRequestBodySize` in Bun.serve raised to accommodate audio files separate from 1 MiB chat limit
 
 ### Auth & Security
 
@@ -68,14 +68,14 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AUDIO-01 | Phase 4 | Pending |
-| AUDIO-02 | Phase 4 | Pending |
-| AUDIO-03 | Phase 4 | Pending |
-| AUDIO-04 | Phase 4 | Pending |
-| AUDIO-05 | Phase 4 | Pending |
-| AUDIO-06 | Phase 4 | Pending |
-| WHSP-04 | Phase 4 | Pending |
-| WHSP-05 | Phase 4 | Pending |
+| AUDIO-01 | Phase 4 | Complete |
+| AUDIO-02 | Phase 4 | Complete |
+| AUDIO-03 | Phase 4 | Complete |
+| AUDIO-04 | Phase 4 | Complete |
+| AUDIO-05 | Phase 4 | Complete |
+| AUDIO-06 | Phase 4 | Complete |
+| WHSP-04 | Phase 4 | Complete |
+| WHSP-05 | Phase 4 | Complete |
 | EP2-01 | Phase 5 | Pending |
 | AUTH2-01 | Phase 5 | Pending |
 | AUTH2-02 | Phase 5 | Pending |
