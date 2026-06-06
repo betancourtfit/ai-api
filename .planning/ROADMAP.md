@@ -101,7 +101,11 @@ Plans:
   3. `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, and `AUDIO_MAX_FILE_BYTES` are read from environment and surfaced in the config object; a missing `WHISPER_MODEL_ALIAS` does not crash the server.
   4. `maxRequestBodySize` in `Bun.serve()` is raised to the configured audio limit without changing the 1 MiB chat-completion behavior.
 
-**Plans:** TBD
+**Plans:** 1 plan
+
+Plans:
+
+- [ ] 04-01-PLAN.md — Audio foundation: whisper/audio config fields, AudioTranscriptionResult type, Zod audio-schema validators + unit tests, maxRequestBodySize raise + 1 MiB chat gate
 
 ### Phase 5: Transcription Route + Auth + Tests
 
