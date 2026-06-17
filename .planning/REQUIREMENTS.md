@@ -102,30 +102,30 @@
 
 ### Endpoint & Auth
 
-- [ ] **GEM-01**: User can POST to `/v1beta/models/{model}:generateContent` and reach a transcription handler
-- [ ] **GEM-02**: Auth accepted via `?key=` query param OR `x-goog-api-key` header, validated against `PERSONAL_PROXY_API_KEY` (constant-time)
-- [ ] **GEM-09**: Errors on this route use Gemini shape `{ "error": { "code", "message", "status" } }` — never the OpenAI `{error:{type,...}}` shape
+- [x] **GEM-01**: User can POST to `/v1beta/models/{model}:generateContent` and reach a transcription handler
+- [x] **GEM-02**: Auth accepted via `?key=` query param OR `x-goog-api-key` header, validated against `PERSONAL_PROXY_API_KEY` (constant-time)
+- [x] **GEM-09**: Errors on this route use Gemini shape `{ "error": { "code", "message", "status" } }` — never the OpenAI `{error:{type,...}}` shape
 
 ### Request Handling
 
-- [ ] **GEM-03**: Handler parses Gemini body, extracts first `inline_data` audio part (base64 + mime_type), decodes to a `File`
-- [ ] **GEM-04**: `file_data` (Files-API URI) parts are rejected as out-of-scope with a Gemini-shaped 400
-- [ ] **GEM-05**: Decoded audio runs through the existing `WhisperService.transcribe`
-- [ ] **GEM-10**: A request with no audio part (text-only / missing inline_data) returns a Gemini-shaped 400
-- [ ] **GEM-11**: Oversize audio (over `AUDIO_MAX_FILE_BYTES`) returns a Gemini-shaped error
+- [x] **GEM-03**: Handler parses Gemini body, extracts first `inline_data` audio part (base64 + mime_type), decodes to a `File`
+- [x] **GEM-04**: `file_data` (Files-API URI) parts are rejected as out-of-scope with a Gemini-shaped 400
+- [x] **GEM-05**: Decoded audio runs through the existing `WhisperService.transcribe`
+- [x] **GEM-10**: A request with no audio part (text-only / missing inline_data) returns a Gemini-shaped 400
+- [x] **GEM-11**: Oversize audio (over `AUDIO_MAX_FILE_BYTES`) returns a Gemini-shaped error
 
 ### Response
 
-- [ ] **GEM-06**: Success returns `{ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP", index: 0 }] }`
-- [ ] **GEM-07**: Response includes `usageMetadata` with `totalTokenCount` (counts may be estimated/zero)
-- [ ] **GEM-08**: Response includes `modelVersion` echoing the requested model id
-- [ ] **GEM-12**: No OpenAI fields leak into the Gemini response body (`text`, `choices` absent)
+- [x] **GEM-06**: Success returns `{ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP", index: 0 }] }`
+- [x] **GEM-07**: Response includes `usageMetadata` with `totalTokenCount` (counts may be estimated/zero)
+- [x] **GEM-08**: Response includes `modelVersion` echoing the requested model id
+- [x] **GEM-12**: No OpenAI fields leak into the Gemini response body (`text`, `choices` absent)
 
 ### Constraints & Regression
 
-- [ ] **GEM-13**: Zero new npm packages; base64 decode + FormData via Bun runtime only
-- [ ] **GEM-14**: Existing `/v1/*` OpenAI endpoints (chat, models, audio/transcriptions) remain unchanged
-- [ ] **GEM-15**: `:streamGenerateContent` is explicitly out of scope for this milestone (documented, not implemented)
+- [x] **GEM-13**: Zero new npm packages; base64 decode + FormData via Bun runtime only
+- [x] **GEM-14**: Existing `/v1/*` OpenAI endpoints (chat, models, audio/transcriptions) remain unchanged
+- [x] **GEM-15**: `:streamGenerateContent` is explicitly out of scope for this milestone (documented, not implemented)
 
 **TDD basis:** `tests/integration/gemini-compat.test.ts` — `describe.skip('Phase 7 TARGET: ...')` block holds the acceptance spec (GEM-01..10). Un-skip at execution start; build until green.
 

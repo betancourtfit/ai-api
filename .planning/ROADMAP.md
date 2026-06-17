@@ -16,7 +16,7 @@
 - [x] **Phase 4: Audio Foundation** - Config env vars, Zod schema, validation rules, and maxRequestBodySize fix — no whisper binary required (completed 2026-06-06)
 - [x] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage (completed 2026-06-06)
 - [x] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field (completed 2026-06-06)
-- [ ] **Phase 7: Gemini-Compatible Transcription Shim** - New `POST /v1beta/models/{model}:generateContent` route, wire-compatible with Google Gemini for audio transcription, so n8n nodes migrate by changing only URL + API key (TDD: spec test pre-committed)
+- [x] **Phase 7: Gemini-Compatible Transcription Shim** - New `POST /v1beta/models/{model}:generateContent` route, wire-compatible with Google Gemini for audio transcription, so n8n nodes migrate by changing only URL + API key (TDD: spec test pre-committed) (completed 2026-06-17)
 
 ---
 
@@ -171,7 +171,7 @@ Plans:
   3. The response carries `usageMetadata` and `modelVersion`, with no OpenAI fields (`text`, `choices`) leaking into the body.
   4. Zero new npm packages; existing `/v1/*` OpenAI endpoints remain unchanged; `:streamGenerateContent` documented as out of scope.
 
-**Plans:** Not yet planned — run `/gsd-plan-phase 7`
+**Plans:** 1/1 plans complete
 
 ---
 
@@ -185,7 +185,7 @@ Plans:
 | 4. Audio Foundation | 3/3 | Complete   | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 2/2 | Complete    | 2026-06-06 |
 | 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
-| 7. Gemini-Compatible Transcription Shim | 0/? | Planned | — |
+| 7. Gemini-Compatible Transcription Shim | 1/1 | Complete   | 2026-06-17 |
 
 ---
 
