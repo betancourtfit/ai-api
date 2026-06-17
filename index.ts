@@ -198,6 +198,17 @@ export function createServer(
                     ));
                 }
 
+                // IN-02: sanity-bound the echoed model segment (post-auth so we don't reveal
+                // anything to unauthenticated callers). It is echoed into modelVersion and logs;
+                // reject path-injecting or absurdly long values before doing any work.
+                if (model.includes('/') || model.length > 200) {
+                    return withRequestId(geminiError(
+                        400,
+                        'Invalid model identifier.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
                 // 2. Parse JSON body (D-07 step 2).
                 let body: unknown;
                 try {
