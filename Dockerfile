@@ -71,6 +71,13 @@ COPY --from=builder /whisper.cpp/build/bin/whisper-server /usr/local/bin/whisper
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
+# CACHEBUST busts every layer below it when its value changes. Set it to the git
+# SHA (or any changing value) in EasyPanel build args / `docker build --build-arg`
+# so a "force rebuild" can't silently reuse a stale app layer. The heavy whisper
+# build in stage 1 stays cached — only the cheap app copy/install below re-runs.
+ARG CACHEBUST=0
+RUN echo "cachebust=${CACHEBUST}"
+
 # Copy the full application (includes index.ts, start.sh, etc.).
 COPY . .
 
@@ -86,6 +93,9 @@ ENV NODE_ENV=production
 ENV PORT=3001
 ENV WHISPER_HOST=127.0.0.1
 ENV WHISPER_PORT=8080
+# Surfaced by GET /health so you can confirm which build is live (CACHEBUST is
+# still in scope from its declaration above).
+ENV BUILD_VERSION=${CACHEBUST}
 
 EXPOSE 3001
 

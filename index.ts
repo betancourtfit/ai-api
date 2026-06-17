@@ -139,8 +139,9 @@ export function createServer(
             }
 
             // EP-04: GET /health — no auth required (healthcheck para EasyPanel / reverse proxies)
+            // BUILD_VERSION (git SHA, baked at image build) lets you confirm WHICH build is live.
             if (request.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-                return withRequestId(new Response('ok', { status: 200 }));
+                return withRequestId(new Response(`ok ${process.env["BUILD_VERSION"] ?? "dev"}`, { status: 200 }));
             }
 
             if (request.method === 'GET' && pathname === '/ready') {
