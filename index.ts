@@ -166,6 +166,147 @@ export function createServer(
                 ));
             }
 
+            // POST /v1beta/models/{model}:generateContent — Gemini-wire-compatible transcription shim (Phase 7).
+            // Placed BEFORE the global Bearer gate (D-01): Gemini auth is ?key= / x-goog-api-key, not Bearer.
+            // OUT OF SCOPE (GEM-15): :streamGenerateContent (Gemini SSE — falls through to the 404 handler),
+            //   file_data Files-API URIs (rejected as 400 below), and multi-candidate responses
+            //   (always a single candidate at index 0). Do not implement here.
+            if (
+                request.method === 'POST'
+                && pathname.startsWith('/v1beta/models/')
+                && pathname.endsWith(':generateContent')
+            ) {
+                const model = pathname.slice(
+                    '/v1beta/models/'.length,
+                    pathname.length - ':generateContent'.length
+                );
+
+                // 1. Auth (D-03/D-04, GEM-02/09): x-goog-api-key header first, then ?key= query param.
+                //    Missing config OR missing/invalid key → Gemini-shaped 401 (NOT openaiError).
+                const apiKey = request.headers.get('x-goog-api-key')
+                    ?? new URL(request.url).searchParams.get('key');
+                if (
+                    !config.personalProxyApiKey
+                    || !apiKey
+                    || !verifyToken(apiKey, config.personalProxyApiKey)
+                ) {
+                    return withRequestId(geminiError(
+                        401,
+                        'API key not valid. Please pass a valid API key.',
+                        'UNAUTHENTICATED'
+                    ));
+                }
+
+                // 2. Parse JSON body (D-07 step 2).
+                let body: any;
+                try {
+                    body = await request.json();
+                } catch {
+                    return withRequestId(geminiError(
+                        400,
+                        'Invalid JSON request body.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 3. Scan parts (D-05/D-07): file_data anywhere → out-of-scope 400 (GEM-04);
+                //    else capture the FIRST inline_data part with both data and mime_type.
+                const contents: any[] = Array.isArray(body?.contents) ? body.contents : [];
+                let inlineData: { data: string; mime_type: string } | null = null;
+                for (const content of contents) {
+                    const parts: any[] = Array.isArray(content?.parts) ? content.parts : [];
+                    for (const part of parts) {
+                        if (part && 'file_data' in part) {
+                            return withRequestId(geminiError(
+                                400,
+                                'file_data (Files API) input is not supported by this proxy.',
+                                'INVALID_ARGUMENT'
+                            ));
+                        }
+                        const id = part?.inline_data;
+                        if (!inlineData && id && id.data && id.mime_type) {
+                            inlineData = { data: id.data, mime_type: id.mime_type };
+                        }
+                    }
+                }
+
+                // 4. No inline audio part found → Gemini-shaped 400 (GEM-10).
+                if (!inlineData) {
+                    return withRequestId(geminiError(
+                        400,
+                        'No inline audio data found in request.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 5. Decode base64 → File using native Buffer + File only (D-06, GEM-13).
+                //    Filename is the literal 'audio' — never derived from untrusted input.
+                const bytes = Buffer.from(inlineData.data, 'base64');
+                const file = new File([bytes], 'audio', { type: inlineData.mime_type });
+
+                // 6. Size check (D-07/GEM-11) — reuse validateAudioFileSize.
+                const sizeCheck = validateAudioFileSize(file, audioMaxFileBytes);
+                if (!sizeCheck.ok) {
+                    return withRequestId(geminiError(
+                        400,
+                        sizeCheck.message,
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 7. Transcribe (D-08/D-13). Do NOT require model === whisperModelAlias.
+                let result: { text: string };
+                try {
+                    result = await whisperService.transcribe(file, config.whisperModelAlias ?? model);
+                } catch {
+                    log('warn', {
+                        event: 'gemini_transcription_failed',
+                        requestId,
+                        route: `${request.method} ${pathname}`,
+                        modelAlias: model,
+                        fileSize: file.size,
+                        status: 503,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(geminiError(
+                        503,
+                        'Transcription service is unavailable.',
+                        'UNAVAILABLE'
+                    ));
+                }
+
+                // 8. Success body (D-09/D-10/D-11). Estimated token counts; echo model in modelVersion.
+                const estTokens = Math.ceil(result.text.length / 4);
+                log('info', {
+                    event: 'gemini_transcription_complete',
+                    requestId,
+                    timestamp: new Date(requestStart).toISOString(),
+                    route: `${request.method} ${pathname}`,
+                    modelAlias: model,
+                    fileSize: file.size,
+                    status: 200,
+                    latencyMs: Date.now() - requestStart,
+                });
+                return withRequestId(new Response(
+                    JSON.stringify({
+                        candidates: [
+                            {
+                                content: { role: 'model', parts: [{ text: result.text }] },
+                                finishReason: 'STOP',
+                                index: 0,
+                            },
+                        ],
+                        usageMetadata: {
+                            promptTokenCount: 0,
+                            candidatesTokenCount: estTokens,
+                            totalTokenCount: estTokens,
+                        },
+                        modelVersion: model,
+                    }),
+                    { status: 200, headers: { 'Content-Type': 'application/json' } }
+                ));
+            }
+
             // --- Auth gate — all routes below require Bearer PERSONAL_PROXY_API_KEY ---
             if (!config.personalProxyApiKey) {
                 return withRequestId(authNotConfiguredError());

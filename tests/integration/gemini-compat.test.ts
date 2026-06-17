@@ -56,7 +56,7 @@ const geminiBody = {
 };
 
 describe('Gemini generateContent → proxy compatibility (URL-swap migration check)', () => {
-    test('Gemini request (path + ?key= auth) is rejected at the proxy (401/404)', async () => {
+    test('Gemini request (path + ?key= auth) is now ACCEPTED by the proxy (Phase 7 shim, 200)', async () => {
         const res = await fetch(
             `${base()}/v1beta/models/gemini-1.5-pro-002:generateContent?key=${PROXY_KEY}`,
             {
@@ -65,9 +65,11 @@ describe('Gemini generateContent → proxy compatibility (URL-swap migration che
                 body: JSON.stringify(geminiBody),
             },
         );
-        // INCOMPATIBLE on two counts: the Gemini path doesn't exist AND the global
-        // Bearer auth gate runs before routing, so ?key= auth fails first → 401.
-        expect([401, 404]).toContain(res.status);
+        // COMPATIBLE as of Phase 7: the :generateContent shim sits before the global Bearer
+        // gate and authenticates via ?key=, so a real Gemini-shaped request now succeeds.
+        // (Assertion flipped from the original 401/404 incompatibility expectation — see the
+        // file header note: "the assertions here will flip and must be updated.")
+        expect(res.status).toBe(200);
     });
 
     test('Gemini ?key= query auth is not accepted — proxy requires Bearer header (401)', async () => {
