@@ -26,7 +26,7 @@ progress:
 Phase: 7 (Gemini-Compatible Transcription Shim)
 Plan: All complete
 Status: Phase 7 complete — verification passed (4/4 must-haves); milestone v2.0 complete
-Last activity: 2026-06-17
+Last activity: 2026-06-17 - Completed quick task 260617-g3v: Embed whisper-server sidecar in Docker container
 
 Progress bar: ██████████ 100% (7/7 phases)
 
@@ -65,6 +65,12 @@ None
 ### Blockers
 
 None
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 260617-g3v | Embed whisper-server sidecar in Docker container (single image, two processes) for EasyPanel deploy | 2026-06-17 | 43008ea | Verified | [260617-g3v-embed-whisper-server-sidecar-in-docker-c](./quick/260617-g3v-embed-whisper-server-sidecar-in-docker-c/) |
 
 ## Session Continuity
 
