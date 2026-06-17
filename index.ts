@@ -251,7 +251,28 @@ export function createServer(
 
                 // 5. Decode base64 → File using native Buffer + File only (D-06, GEM-13).
                 //    Filename is the literal 'audio' — never derived from untrusted input.
+                //    WR-01: bound the *encoded* length before allocating the decoded buffer.
+                //    base64 length * 3/4 ≈ decoded byte count, a safe upper-bound proxy, so an
+                //    oversize payload is rejected before the ~18 MiB decode allocation (DoS).
+                const approxBytes = Math.floor(inlineData.data.length * 3 / 4);
+                if (approxBytes > audioMaxFileBytes) {
+                    return withRequestId(geminiError(
+                        400,
+                        `File too large. Maximum allowed size is ${audioMaxFileBytes} bytes.`,
+                        'INVALID_ARGUMENT'
+                    ));
+                }
                 const bytes = Buffer.from(inlineData.data, 'base64');
+                // HG-01: reject empty/zero-length decoded audio. Buffer.from(..., 'base64') is
+                // lenient (never throws, silently drops non-alphabet chars), so garbage or
+                // whitespace-only input can decode to 0 bytes and otherwise reach the sidecar.
+                if (bytes.length === 0) {
+                    return withRequestId(geminiError(
+                        400,
+                        'Inline audio data is empty or not valid base64.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
                 const file = new File([bytes], 'audio', { type: inlineData.mime_type });
 
                 // 6. Size check (D-07/GEM-11) — reuse validateAudioFileSize.
