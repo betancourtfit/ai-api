@@ -40,14 +40,14 @@ RUN cmake -B build -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LI
 
 # Binary is at /whisper.cpp/build/bin/whisper-server
 
-# Fetch the whisper model at build time. The model is git-ignored (77MB) so it is
+# Fetch the whisper model at build time. The model is git-ignored (~466MB) so it is
 # NOT in a clean checkout — a build-from-git deploy (EasyPanel/CI) would otherwise
 # ship without it and every transcription would 503. -f fails the build loudly on
 # any HTTP error rather than baking an empty file. SHA pinned to detect upstream drift.
 RUN mkdir -p /models \
-    && curl -fL -o /models/ggml-tiny.bin \
-       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
-    && echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  /models/ggml-tiny.bin" | sha256sum -c -
+    && curl -fL -o /models/ggml-small.bin \
+       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin \
+    && echo "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  /models/ggml-small.bin" | sha256sum -c -
 
 # ============================================================
 # Stage 2: final — Bun proxy + whisper-server sidecar
@@ -82,8 +82,8 @@ RUN echo "cachebust=${CACHEBUST}"
 COPY . .
 
 # Place the build-fetched model AFTER `COPY . .` so it is always present even on a
-# clean checkout where whisper-models/ggml-tiny.bin is absent from the build context.
-COPY --from=builder /models/ggml-tiny.bin whisper-models/ggml-tiny.bin
+# clean checkout where whisper-models/ggml-small.bin is absent from the build context.
+COPY --from=builder /models/ggml-small.bin whisper-models/ggml-small.bin
 
 # Make the entrypoint executable.
 RUN chmod +x start.sh
