@@ -9,8 +9,8 @@
 ### Endpoint
 
 - [x] **EP2-01**: User can POST multipart/form-data to `/v1/audio/transcriptions` with a `file` (audio) and `model` (string) field
-- [ ] **EP2-02**: User can GET `/v1/models` and see the whisper alias when whisper-server is configured
-- [ ] **EP2-03**: User can GET `/ready` and see a `whisperAvailable` boolean field reflecting sidecar health
+- [x] **EP2-02**: User can GET `/v1/models` and see the whisper alias when whisper-server is configured
+- [x] **EP2-03**: User can GET `/ready` and see a `whisperAvailable` boolean field reflecting sidecar health
 
 ### Audio Handling
 
@@ -23,9 +23,9 @@
 
 ### Whisper Integration
 
-- [ ] **WHSP-01**: Proxy forwards validated transcription request to local whisper-server via HTTP fetch
-- [ ] **WHSP-02**: Whisper model alias configured via `WHISPER_MODEL_ALIAS` env var; maps to sidecar model
-- [ ] **WHSP-03**: When whisper-server is unreachable, proxy returns OpenAI-shaped 503; chat completions remain unaffected
+- [x] **WHSP-01**: Proxy forwards validated transcription request to local whisper-server via HTTP fetch
+- [x] **WHSP-02**: Whisper model alias configured via `WHISPER_MODEL_ALIAS` env var; maps to sidecar model
+- [x] **WHSP-03**: When whisper-server is unreachable, proxy returns OpenAI-shaped 503; chat completions remain unaffected
 - [x] **WHSP-04**: `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, `AUDIO_MAX_FILE_BYTES` env vars respected by config
 - [x] **WHSP-05**: `maxRequestBodySize` in Bun.serve raised to accommodate audio files separate from 1 MiB chat limit
 
@@ -88,11 +88,11 @@
 | TEST2-05 | Phase 5 | Complete |
 | TEST2-06 | Phase 5 | Complete |
 | TEST2-07 | Phase 5 | Complete |
-| EP2-02 | Phase 6 | Pending |
-| EP2-03 | Phase 6 | Pending |
-| WHSP-01 | Phase 6 | Pending |
-| WHSP-02 | Phase 6 | Pending |
-| WHSP-03 | Phase 6 | Pending |
+| EP2-02 | Phase 6 | Complete |
+| EP2-03 | Phase 6 | Complete |
+| WHSP-01 | Phase 6 | Complete |
+| WHSP-02 | Phase 6 | Complete |
+| WHSP-03 | Phase 6 | Complete |
 
 ---
 

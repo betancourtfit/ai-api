@@ -15,7 +15,7 @@
 - [x] **Phase 3: Full Compliance + Tests** - Complete normalization, observability, diagnostic endpoints, and full test coverage (completed 2026-06-05)
 - [x] **Phase 4: Audio Foundation** - Config env vars, Zod schema, validation rules, and maxRequestBodySize fix — no whisper binary required (completed 2026-06-06)
 - [x] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage (completed 2026-06-06)
-- [ ] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field
+- [x] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field (completed 2026-06-06)
 
 ---
 
@@ -141,7 +141,7 @@ Plans:
   3. A `curl` smoke test against a running whisper-server instance returns `{ "text": "..." }` through the proxy with HTTP 200; when the sidecar is stopped, the same request returns 503 with an OpenAI-shaped error body, and chat-completion requests continue to succeed.
   4. Zero new npm packages are added; all sidecar communication uses `fetch()` and `FormData` from the Bun runtime.
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 **Wave 1**
 
@@ -153,7 +153,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-03-PLAN.md — Live curl smoke checkpoint against a real whisper-server (ROADMAP criterion 3; WHSP-01, WHSP-03)
+- [x] 06-03-PLAN.md — Live curl smoke checkpoint against a real whisper-server (ROADMAP criterion 3; WHSP-01, WHSP-03)
 
 ---
 
@@ -166,7 +166,7 @@ Plans:
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
 | 4. Audio Foundation | 3/3 | Complete   | 2026-06-06 |
 | 5. Transcription Route + Auth + Tests | 2/2 | Complete    | 2026-06-06 |
-| 6. Whisper Sidecar + Models + Ready | 2/3 | In Progress|  |
+| 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
 
 ---
 
