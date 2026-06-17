@@ -47,6 +47,9 @@ export class HttpWhisperService implements WhisperService {
         const form = new FormData();
         form.append('file', file, 'audio');
         form.append('response_format', 'json');
+        // whisper-server defaults language to "en" — force-decoding non-English audio
+        // produces canonical hallucinations ("the quick brown fox…"). "auto" detects.
+        form.append('language', config.whisperLanguage);
 
         const res = await fetch(`${this.baseUrl}${this.inferencePath}`, {
             method: 'POST',

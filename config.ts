@@ -67,6 +67,10 @@ export const config = {
     whisperTimeoutMs: requiredPositiveInt("WHISPER_TIMEOUT_MS", 30_000),
     // optional() returns null when unset — missing WHISPER_MODEL_ALIAS is non-fatal
     whisperModelAlias: optional("WHISPER_MODEL_ALIAS"),
+    // whisper-server defaults language to "en"; force es by default (operator always
+    // speaks Spanish). Forcing the wrong language yields canonical hallucinations.
+    // Set WHISPER_LANGUAGE=auto for per-clip detection.
+    whisperLanguage: process.env["WHISPER_LANGUAGE"] ?? "es",
 
     // AUDIO-03 + WHSP-05: file and body size limits
     audioMaxFileBytes: requiredPositiveInt("AUDIO_MAX_FILE_BYTES", 26_214_400),   // 25 MiB
