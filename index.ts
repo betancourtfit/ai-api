@@ -128,7 +128,8 @@ export function createServer(
             // OBS-01: generate request ID at the very top — attached to every response
             const requestId = crypto.randomUUID();
             const requestStart = Date.now();
-            const { pathname } = new URL(request.url);
+            const url = new URL(request.url);
+            const { pathname } = url;
 
             // OBS-01: rebuild response with X-Request-ID header on every non-streaming return
             function withRequestId(response: Response): Response {
@@ -184,7 +185,7 @@ export function createServer(
                 // 1. Auth (D-03/D-04, GEM-02/09): x-goog-api-key header first, then ?key= query param.
                 //    Missing config OR missing/invalid key → Gemini-shaped 401 (NOT openaiError).
                 const apiKey = request.headers.get('x-goog-api-key')
-                    ?? new URL(request.url).searchParams.get('key');
+                    ?? url.searchParams.get('key');
                 if (
                     !config.personalProxyApiKey
                     || !apiKey
