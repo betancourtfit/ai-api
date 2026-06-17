@@ -132,7 +132,7 @@ describe('Gemini generateContent → proxy compatibility (URL-swap migration che
 //
 // Out of scope (explicit): :streamGenerateContent, file_data Files-API URIs, multi-candidate.
 // ─────────────────────────────────────────────────────────────────────────────
-describe.skip('Phase 7 TARGET: Gemini-compatible :generateContent shim', () => {
+describe('Phase 7 TARGET: Gemini-compatible :generateContent shim', () => {
     const geminiUrl = (key?: string) =>
         `${base()}/v1beta/models/gemini-1.5-pro-002:generateContent${key ? `?key=${key}` : ''}`;
 
