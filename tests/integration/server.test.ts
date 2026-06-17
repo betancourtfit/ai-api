@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, set
 import { APIError as CerebrasAPIError } from '@cerebras/cerebras_cloud_sdk';
 import { APIError as GroqAPIError } from 'groq-sdk';
 import { createServer } from '../../index';
+import { config } from '../../config';
 import { resetForTesting } from '../../routing/provider-state';
 import type { AudioTranscriptionResult } from '../../types';
 import type { WhisperService } from '../../whisper-service';
@@ -478,6 +479,87 @@ describe('Integration: routing and streaming tests', () => {
         }
     });
 
+});
+
+describe('Integration: optional model with DEFAULT_MODEL_ALIAS fallback', () => {
+    // Dedicated server + adapters so this block does not reuse a keep-alive socket
+    // left over from the preceding SSE streaming test (which can stall the next fetch).
+    let defaultServer: ReturnType<typeof createServer>;
+    let defaultCerebras: MockAdapter;
+    let defaultGroq: MockAdapter;
+
+    // config.defaultModelAlias is read live per-request in the chat handler.
+    // It is typed readonly (as const) but not frozen at runtime, so we mutate it
+    // around each test and restore the original value afterward.
+    const original = config.defaultModelAlias;
+
+    beforeAll(() => {
+        defaultCerebras = makeMockAdapter('cerebras');
+        defaultGroq = makeMockAdapter('groq');
+        defaultServer = createServer({ cerebras: defaultCerebras, groq: defaultGroq }, 0);
+    });
+
+    afterAll(() => {
+        defaultServer.stop(true);
+    });
+
+    beforeEach(() => {
+        resetForTesting();
+        resetMockAdapter(defaultCerebras);
+        resetMockAdapter(defaultGroq);
+    });
+
+    afterEach(() => {
+        (config as { defaultModelAlias: string | null }).defaultModelAlias = original;
+    });
+
+    function setDefaultAlias(value: string | null): void {
+        (config as { defaultModelAlias: string | null }).defaultModelAlias = value;
+    }
+
+    async function postDefault(body: object): Promise<Response> {
+        return fetch(`http://127.0.0.1:${defaultServer.port}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${PROXY_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
+
+    test('model omitted + DEFAULT_MODEL_ALIAS set → resolves to that alias (200)', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault({ messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { model?: string };
+        // resolved alias flows into normalized response model field
+        expect(body.model).toBe('gpt-oss-120b-balanced');
+    });
+
+    test('model omitted + no DEFAULT_MODEL_ALIAS → 400 with param=model', async () => {
+        setDefaultAlias(null);
+        const res = await postDefault({ messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { param?: string; code?: string } };
+        expect(body.error?.param).toBe('model');
+    });
+
+    test('explicit known alias → unchanged (200)', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault(validBody);
+        expect(res.status).toBe(200);
+        const body = await res.json() as { model?: string };
+        expect(body.model).toBe('gpt-oss-120b-balanced');
+    });
+
+    test('explicit unknown alias → still 400 model_not_found', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault({ model: 'does-not-exist', messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('model_not_found');
+    });
 });
 
 describe('Integration: audio transcription tests', () => {

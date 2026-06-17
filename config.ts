@@ -56,6 +56,9 @@ export const config = {
     })(),
     modelRegistryJson: process.env["MODEL_REGISTRY_JSON"]
         ?? `{"gpt-oss-120b-balanced":{"cerebras":"gpt-oss-120b","groq":"openai/gpt-oss-120b"}}`,
+    // OPT-IN default alias: when client omits `model` on /v1/chat/completions, fall back to this.
+    // optional() returns null when unset — no default configured means omitting model is a 400.
+    defaultModelAlias: optional("DEFAULT_MODEL_ALIAS"),
     logLevel: process.env["LOG_LEVEL"] ?? "info",
 
     // WHSP-04: whisper sidecar connection

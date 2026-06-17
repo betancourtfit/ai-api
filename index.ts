@@ -580,10 +580,23 @@ export function createServer(
 
                 const input = validation.data;
 
-                // VALID-01: unknown model alias — reject before any upstream call
-                if (!isKnownAlias(input.model)) {
+                // OPT-IN default alias: client may omit `model`; fall back to DEFAULT_MODEL_ALIAS.
+                // When neither is present, reject before any upstream call.
+                const requestedModel = input.model ?? config.defaultModelAlias ?? undefined;
+                if (requestedModel === undefined) {
                     return withRequestId(openaiError(
-                        `Unknown model '${input.model}'.`,
+                        'Missing required parameter: model (and no DEFAULT_MODEL_ALIAS configured).',
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        'model',
+                        400
+                    ));
+                }
+
+                // VALID-01: unknown model alias — reject before any upstream call
+                if (!isKnownAlias(requestedModel)) {
+                    return withRequestId(openaiError(
+                        `Unknown model '${requestedModel}'.`,
                         'invalid_request_error',
                         'model_not_found',
                         'model',
@@ -603,7 +616,7 @@ export function createServer(
                     seed: input.seed ?? null,
                 };
 
-                const candidates = chooseEligibleProviders(input.model);
+                const candidates = chooseEligibleProviders(requestedModel);
                 // WR-02: do NOT advance cursor unconditionally here — cursor is advanced after
                 // each failed provider attempt so that on recovery the next request starts from
                 // the provider after the one that last failed, not from a stale pre-eligibility-check position.
@@ -614,7 +627,7 @@ export function createServer(
                         requestId,
                         timestamp: new Date(requestStart).toISOString(),
                         route: `${request.method} ${pathname}`,
-                        logicalAlias: input.model,
+                        logicalAlias: requestedModel,
                         provider: null,
                         upstreamModelId: null,
                         attempt: 0,
@@ -644,7 +657,7 @@ export function createServer(
                     let failoverReason: string | null = null;
 
                     for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                        const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                        const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
                         if (!upstreamModelId) continue;
                         const adapter = adapters[provider];
                         attemptCount++;
@@ -714,7 +727,7 @@ export function createServer(
                             requestId,
                             timestamp: new Date(requestStart).toISOString(),
                             route: `${request.method} ${pathname}`,
-                            logicalAlias: input.model,
+                            logicalAlias: requestedModel,
                             provider: null,
                             upstreamModelId: null,
                             attempt: attemptCount,
@@ -757,7 +770,7 @@ export function createServer(
                                     continue; // terminal usage chunk — not forwarded downstream
                                 }
 
-                                const normalized = normalizeChunk(chunk, input.model);
+                                const normalized = normalizeChunk(chunk, requestedModel);
                                 if (!hasVisibleChunkData(normalized)) {
                                     continue;
                                 }
@@ -784,7 +797,7 @@ export function createServer(
                                 requestId,
                                 timestamp: new Date(requestStart).toISOString(),
                                 route: `${request.method} ${pathname}`,
-                                logicalAlias: input.model,
+                                logicalAlias: requestedModel,
                                 provider: finalProvider,
                                 upstreamModelId: finalUpstreamModelId,
                                 attempt: finalAttemptCount,
@@ -814,7 +827,7 @@ export function createServer(
                                 requestId,
                                 timestamp: new Date(requestStart).toISOString(),
                                 route: `${request.method} ${pathname}`,
-                                logicalAlias: input.model,
+                                logicalAlias: requestedModel,
                                 provider: finalProvider,
                                 upstreamModelId: finalUpstreamModelId,
                                 attempt: finalAttemptCount,
@@ -851,7 +864,7 @@ export function createServer(
                 let failoverReason: string | null = null;
 
                 for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                    const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                    const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
                     if (!upstreamModelId) continue;
                     const adapter = adapters[provider];
                     attempt++;
@@ -870,7 +883,7 @@ export function createServer(
                             log('warn', { event: 'usage_missing', provider, requestId });
                         }
 
-                        const normalized = normalizeResponse(result, input.model);
+                        const normalized = normalizeResponse(result, requestedModel);
 
                         // OBS-02: request-completion log for non-streaming success
                         log('info', {
@@ -878,7 +891,7 @@ export function createServer(
                             requestId,
                             timestamp: new Date(requestStart).toISOString(),
                             route: `${request.method} ${pathname}`,
-                            logicalAlias: input.model,
+                            logicalAlias: requestedModel,
                             provider,
                             upstreamModelId,
                             attempt,
@@ -958,7 +971,7 @@ export function createServer(
                     requestId,
                     timestamp: new Date(requestStart).toISOString(),
                     route: `${request.method} ${pathname}`,
-                    logicalAlias: input.model,
+                    logicalAlias: requestedModel,
                     provider: null,
                     upstreamModelId: null,
                     attempt,
