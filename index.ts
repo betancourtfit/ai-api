@@ -201,7 +201,7 @@ export function createServer(
                 // IN-02: sanity-bound the echoed model segment (post-auth so we don't reveal
                 // anything to unauthenticated callers). It is echoed into modelVersion and logs;
                 // reject path-injecting or absurdly long values before doing any work.
-                if (model.includes('/') || model.length > 200) {
+                if (model.length === 0 || model.includes('/') || model.length > 200) {
                     return withRequestId(geminiError(
                         400,
                         'Invalid model identifier.',

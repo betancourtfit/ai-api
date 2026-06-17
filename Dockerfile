@@ -17,6 +17,7 @@ RUN apt-get update \
        cmake \
        git \
        ca-certificates \
+       curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone whisper.cpp pinned to a verified tag that includes the server example.
@@ -39,6 +40,15 @@ RUN cmake -B build -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LI
 
 # Binary is at /whisper.cpp/build/bin/whisper-server
 
+# Fetch the whisper model at build time. The model is git-ignored (77MB) so it is
+# NOT in a clean checkout — a build-from-git deploy (EasyPanel/CI) would otherwise
+# ship without it and every transcription would 503. -f fails the build loudly on
+# any HTTP error rather than baking an empty file. SHA pinned to detect upstream drift.
+RUN mkdir -p /models \
+    && curl -fL -o /models/ggml-tiny.bin \
+       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
+    && echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  /models/ggml-tiny.bin" | sha256sum -c -
+
 # ============================================================
 # Stage 2: final — Bun proxy + whisper-server sidecar
 # ============================================================
@@ -47,9 +57,11 @@ FROM --platform=linux/amd64 oven/bun:1.1.29
 
 WORKDIR /app
 
-# Install runtime OpenMP dependency (libstdc++ already present in base).
+# Runtime deps: libgomp1 (OpenMP; libstdc++ already in base) and ffmpeg, which
+# whisper-server --convert shells out to for non-WAV inputs (m4a/mp4/webm/aac —
+# the iOS/n8n-default formats). Without it those uploads 503.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled whisper-server binary onto PATH.
@@ -59,8 +71,12 @@ COPY --from=builder /whisper.cpp/build/bin/whisper-server /usr/local/bin/whisper
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
-# Copy the full application (includes index.ts, whisper-models/, start.sh, etc.).
+# Copy the full application (includes index.ts, start.sh, etc.).
 COPY . .
+
+# Place the build-fetched model AFTER `COPY . .` so it is always present even on a
+# clean checkout where whisper-models/ggml-tiny.bin is absent from the build context.
+COPY --from=builder /models/ggml-tiny.bin whisper-models/ggml-tiny.bin
 
 # Make the entrypoint executable.
 RUN chmod +x start.sh

@@ -72,6 +72,20 @@ describe('Gemini generateContent → proxy compatibility (URL-swap migration che
         expect(res.status).toBe(200);
     });
 
+    test('Empty model segment (/v1beta/models/:generateContent) is rejected (400), matching Google NOT_FOUND for a missing model', async () => {
+        // A client that ships the model placeholder un-substituted would otherwise get a
+        // misleading 200 with modelVersion:"". The IN-02 guard must reject the empty id.
+        const res = await fetch(
+            `${base()}/v1beta/models/:generateContent?key=${PROXY_KEY}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(geminiBody),
+            },
+        );
+        expect(res.status).toBe(400);
+    });
+
     test('Gemini ?key= query auth is not accepted — proxy requires Bearer header (401)', async () => {
         // Hit the real audio route but authenticate the Gemini way (query param, no Bearer).
         const res = await fetch(`${base()}/v1/audio/transcriptions?key=${PROXY_KEY}`, {
