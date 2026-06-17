@@ -1,0 +1,25 @@
+# Dependencies installed by bun install — not needed in build context
+node_modules/
+
+# Compiled output artifacts
+dist/
+
+# Git history — large and unused in image
+.git/
+
+# GSD planning artifacts — not needed in image
+.planning/
+
+# Local environment files — must NEVER be in the image
+.env
+.env.local
+
+# Any local whisper.cpp source checkout (can be large)
+whisper.cpp/
+
+# OS and editor cruft
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

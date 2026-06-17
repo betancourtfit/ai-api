@@ -8,9 +8,9 @@
 
 ### Endpoint
 
-- [ ] **EP2-01**: User can POST multipart/form-data to `/v1/audio/transcriptions` with a `file` (audio) and `model` (string) field
-- [ ] **EP2-02**: User can GET `/v1/models` and see the whisper alias when whisper-server is configured
-- [ ] **EP2-03**: User can GET `/ready` and see a `whisperAvailable` boolean field reflecting sidecar health
+- [x] **EP2-01**: User can POST multipart/form-data to `/v1/audio/transcriptions` with a `file` (audio) and `model` (string) field
+- [x] **EP2-02**: User can GET `/v1/models` and see the whisper alias when whisper-server is configured
+- [x] **EP2-03**: User can GET `/ready` and see a `whisperAvailable` boolean field reflecting sidecar health
 
 ### Audio Handling
 
@@ -23,31 +23,31 @@
 
 ### Whisper Integration
 
-- [ ] **WHSP-01**: Proxy forwards validated transcription request to local whisper-server via HTTP fetch
-- [ ] **WHSP-02**: Whisper model alias configured via `WHISPER_MODEL_ALIAS` env var; maps to sidecar model
-- [ ] **WHSP-03**: When whisper-server is unreachable, proxy returns OpenAI-shaped 503; chat completions remain unaffected
+- [x] **WHSP-01**: Proxy forwards validated transcription request to local whisper-server via HTTP fetch
+- [x] **WHSP-02**: Whisper model alias configured via `WHISPER_MODEL_ALIAS` env var; maps to sidecar model
+- [x] **WHSP-03**: When whisper-server is unreachable, proxy returns OpenAI-shaped 503; chat completions remain unaffected
 - [x] **WHSP-04**: `WHISPER_PORT`, `WHISPER_HOST`, `WHISPER_TIMEOUT_MS`, `AUDIO_MAX_FILE_BYTES` env vars respected by config
 - [x] **WHSP-05**: `maxRequestBodySize` in Bun.serve raised to accommodate audio files separate from 1 MiB chat limit
 
 ### Auth & Security
 
-- [ ] **AUTH2-01**: POST /v1/audio/transcriptions requires valid Bearer token; returns 401 if missing or invalid (reuses existing auth middleware)
-- [ ] **AUTH2-02**: Proxy never logs audio file content, filenames, or transcribed text
+- [x] **AUTH2-01**: POST /v1/audio/transcriptions requires valid Bearer token; returns 401 if missing or invalid (reuses existing auth middleware)
+- [x] **AUTH2-02**: Proxy never logs audio file content, filenames, or transcribed text
 
 ### Observability
 
-- [ ] **OBS2-01**: Every transcription response carries `X-Request-ID` header (reuses existing middleware)
-- [ ] **OBS2-02**: Structured log per transcription request: requestId, latencyMs, fileSize, modelAlias, status — no audio content logged
+- [x] **OBS2-01**: Every transcription response carries `X-Request-ID` header (reuses existing middleware)
+- [x] **OBS2-02**: Structured log per transcription request: requestId, latencyMs, fileSize, modelAlias, status — no audio content logged
 
 ### Tests
 
-- [ ] **TEST2-01**: 401 returned on missing or invalid auth token
-- [ ] **TEST2-02**: 400 returned when `file` field is absent
-- [ ] **TEST2-03**: 400 returned when `model` is an unknown alias
-- [ ] **TEST2-04**: 413 returned when file exceeds 25 MB
-- [ ] **TEST2-05**: 400 returned when request contains unknown fields
-- [ ] **TEST2-06**: 200 with `{ text: "..." }` returned when mock whisper service returns a transcript
-- [ ] **TEST2-07**: 503 returned when whisper service reports unavailable
+- [x] **TEST2-01**: 401 returned on missing or invalid auth token
+- [x] **TEST2-02**: 400 returned when `file` field is absent
+- [x] **TEST2-03**: 400 returned when `model` is an unknown alias
+- [x] **TEST2-04**: 413 returned when file exceeds 25 MB
+- [x] **TEST2-05**: 400 returned when request contains unknown fields
+- [x] **TEST2-06**: 200 with `{ text: "..." }` returned when mock whisper service returns a transcript
+- [x] **TEST2-07**: 503 returned when whisper service reports unavailable
 
 ---
 
@@ -76,23 +76,58 @@
 | AUDIO-06 | Phase 4 | Complete |
 | WHSP-04 | Phase 4 | Complete |
 | WHSP-05 | Phase 4 | Complete |
-| EP2-01 | Phase 5 | Pending |
-| AUTH2-01 | Phase 5 | Pending |
-| AUTH2-02 | Phase 5 | Pending |
-| OBS2-01 | Phase 5 | Pending |
-| OBS2-02 | Phase 5 | Pending |
-| TEST2-01 | Phase 5 | Pending |
-| TEST2-02 | Phase 5 | Pending |
-| TEST2-03 | Phase 5 | Pending |
-| TEST2-04 | Phase 5 | Pending |
-| TEST2-05 | Phase 5 | Pending |
-| TEST2-06 | Phase 5 | Pending |
-| TEST2-07 | Phase 5 | Pending |
-| EP2-02 | Phase 6 | Pending |
-| EP2-03 | Phase 6 | Pending |
-| WHSP-01 | Phase 6 | Pending |
-| WHSP-02 | Phase 6 | Pending |
-| WHSP-03 | Phase 6 | Pending |
+| EP2-01 | Phase 5 | Complete |
+| AUTH2-01 | Phase 5 | Complete |
+| AUTH2-02 | Phase 5 | Complete |
+| OBS2-01 | Phase 5 | Complete |
+| OBS2-02 | Phase 5 | Complete |
+| TEST2-01 | Phase 5 | Complete |
+| TEST2-02 | Phase 5 | Complete |
+| TEST2-03 | Phase 5 | Complete |
+| TEST2-04 | Phase 5 | Complete |
+| TEST2-05 | Phase 5 | Complete |
+| TEST2-06 | Phase 5 | Complete |
+| TEST2-07 | Phase 5 | Complete |
+| EP2-02 | Phase 6 | Complete |
+| EP2-03 | Phase 6 | Complete |
+| WHSP-01 | Phase 6 | Complete |
+| WHSP-02 | Phase 6 | Complete |
+| WHSP-03 | Phase 6 | Complete |
+
+---
+
+## Milestone v3.0 — Gemini-Compatible Transcription Shim
+
+**Goal:** A new route `POST /v1beta/models/{model}:generateContent` wire-compatible with Google's Gemini generateContent for audio transcription, so existing n8n nodes migrate by changing only the base URL and API key. Reuses the existing WhisperService — zero new npm packages.
+
+### Endpoint & Auth
+
+- [x] **GEM-01**: User can POST to `/v1beta/models/{model}:generateContent` and reach a transcription handler
+- [x] **GEM-02**: Auth accepted via `?key=` query param OR `x-goog-api-key` header, validated against `PERSONAL_PROXY_API_KEY` (constant-time)
+- [x] **GEM-09**: Errors on this route use Gemini shape `{ "error": { "code", "message", "status" } }` — never the OpenAI `{error:{type,...}}` shape
+
+### Request Handling
+
+- [x] **GEM-03**: Handler parses Gemini body, extracts first `inline_data` audio part (base64 + mime_type), decodes to a `File`
+- [x] **GEM-04**: `file_data` (Files-API URI) parts are rejected as out-of-scope with a Gemini-shaped 400
+- [x] **GEM-05**: Decoded audio runs through the existing `WhisperService.transcribe`
+- [x] **GEM-10**: A request with no audio part (text-only / missing inline_data) returns a Gemini-shaped 400
+- [x] **GEM-11**: Oversize audio (over `AUDIO_MAX_FILE_BYTES`) returns a Gemini-shaped error
+
+### Response
+
+- [x] **GEM-06**: Success returns `{ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP", index: 0 }] }`
+- [x] **GEM-07**: Response includes `usageMetadata` with `totalTokenCount` (counts may be estimated/zero)
+- [x] **GEM-08**: Response includes `modelVersion` echoing the requested model id
+- [x] **GEM-12**: No OpenAI fields leak into the Gemini response body (`text`, `choices` absent)
+
+### Constraints & Regression
+
+- [x] **GEM-13**: Zero new npm packages; base64 decode + FormData via Bun runtime only
+- [x] **GEM-14**: Existing `/v1/*` OpenAI endpoints (chat, models, audio/transcriptions) remain unchanged
+- [x] **GEM-15**: `:streamGenerateContent` is explicitly out of scope for this milestone (documented, not implemented)
+
+**TDD basis:** `tests/integration/gemini-compat.test.ts` — `describe.skip('Phase 7 TARGET: ...')` block holds the acceptance spec (GEM-01..10). Un-skip at execution start; build until green.
 
 ---
 

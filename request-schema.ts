@@ -11,7 +11,7 @@ const messageSchema = z.strictObject({
 
 // Top-level schema: strict allowlist per CLAUDE.md §11 and RESEARCH.md Pattern 4
 export const chatCompletionSchema = z.strictObject({
-    model: z.string(),
+    model: z.string().optional(),
     messages: z.array(messageSchema).min(1),
     temperature: z.number().min(0).max(2).optional(),
     top_p: z.number().min(0).max(1).optional(),

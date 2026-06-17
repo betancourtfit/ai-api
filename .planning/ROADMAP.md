@@ -14,8 +14,9 @@
 - [x] **Phase 2: Routing + Streaming** - Stateful round-robin, cooldown, rate-limit parsing, SSE relay, and all /v1 endpoints (completed 2026-06-05)
 - [x] **Phase 3: Full Compliance + Tests** - Complete normalization, observability, diagnostic endpoints, and full test coverage (completed 2026-06-05)
 - [x] **Phase 4: Audio Foundation** - Config env vars, Zod schema, validation rules, and maxRequestBodySize fix — no whisper binary required (completed 2026-06-06)
-- [ ] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage
-- [ ] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field
+- [x] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage (completed 2026-06-06)
+- [x] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field (completed 2026-06-06)
+- [x] **Phase 7: Gemini-Compatible Transcription Shim** - New `POST /v1beta/models/{model}:generateContent` route, wire-compatible with Google Gemini for audio transcription, so n8n nodes migrate by changing only URL + API key (TDD: spec test pre-committed) (completed 2026-06-17)
 
 ---
 
@@ -119,8 +120,15 @@ Plans:
   3. Every transcription response (success and error) carries `X-Request-ID`; structured logs record `requestId`, `latencyMs`, `fileSize`, `modelAlias`, and `status` without logging audio content or filenames.
   4. A successful mock response returns exactly `{ "text": "..." }` with HTTP 200 — no extra provider fields in the body.
 
-**Plans:** TBD
-**UI hint**: no
+**Plans:** 2/2 plans complete
+
+**Wave 1**
+
+- [x] 05-01-PLAN.md — WhisperService interface + NoopWhisperService stub + createServer() extension + POST /v1/audio/transcriptions handler (EP2-01, AUTH2-01, AUTH2-02, OBS2-01, OBS2-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 05-02-PLAN.md — 7-case audio integration test suite against mock WhisperService (TEST2-01..07)
 
 ### Phase 6: Whisper Sidecar + Models + Ready
 
@@ -134,7 +142,36 @@ Plans:
   3. A `curl` smoke test against a running whisper-server instance returns `{ "text": "..." }` through the proxy with HTTP 200; when the sidecar is stopped, the same request returns 503 with an OpenAI-shaped error body, and chat-completion requests continue to succeed.
   4. Zero new npm packages are added; all sidecar communication uses `fetch()` and `FormData` from the Bun runtime.
 
-**Plans:** TBD
+**Plans:** 3/3 plans complete
+
+**Wave 1**
+
+- [x] 06-01-PLAN.md — HttpWhisperService + health() interface method + fake-sidecar unit tests (WHSP-01, WHSP-02, WHSP-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 06-02-PLAN.md — /v1/models alias append + /ready whisperAvailable + import.meta.main selection + integration tests (EP2-02, EP2-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 06-03-PLAN.md — Live curl smoke checkpoint against a real whisper-server (ROADMAP criterion 3; WHSP-01, WHSP-03)
+
+### Phase 7: Gemini-Compatible Transcription Shim
+
+**Milestone:** v3.0
+**Goal:** A new route `POST /v1beta/models/{model}:generateContent` is wire-compatible with Google's Gemini generateContent for audio transcription. An n8n node migrating from Gemini changes only the base URL and the API key value — auth mechanism (`?key=` / `x-goog-api-key`), request body, response shape, and error shape all match Gemini.
+**Mode:** mvp
+**Depends on:** Phase 6 (reuses WhisperService)
+**Requirements:** GEM-01..15
+**Approach:** TDD — acceptance spec pre-committed as `describe.skip('Phase 7 TARGET')` in `tests/integration/gemini-compat.test.ts`. Un-skip at execution start; build until all green.
+**Success Criteria** (what must be TRUE):
+
+  1. A Gemini-shaped transcription request (`contents[].parts[].inline_data`) authenticated via `?key=` or `x-goog-api-key` returns a Gemini-shaped `candidates[0].content.parts[0].text` transcript with HTTP 200.
+  2. Errors on this route (bad key, missing audio, oversize, file_data URI) return the Gemini shape `{ error: { code, message, status } }` — never the OpenAI error shape.
+  3. The response carries `usageMetadata` and `modelVersion`, with no OpenAI fields (`text`, `choices`) leaking into the body.
+  4. Zero new npm packages; existing `/v1/*` OpenAI endpoints remain unchanged; `:streamGenerateContent` documented as out of scope.
+
+**Plans:** 1/1 plans complete
 
 ---
 
@@ -146,10 +183,11 @@ Plans:
 | 2. Routing + Streaming | 2/2 | Complete | 2026-06-05 |
 | 3. Full Compliance + Tests | 3/3 | Complete | 2026-06-05 |
 | 4. Audio Foundation | 3/3 | Complete   | 2026-06-06 |
-| 5. Transcription Route + Auth + Tests | 0/? | Not started | - |
-| 6. Whisper Sidecar + Models + Ready | 0/? | Not started | - |
+| 5. Transcription Route + Auth + Tests | 2/2 | Complete    | 2026-06-06 |
+| 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
+| 7. Gemini-Compatible Transcription Shim | 1/1 | Complete   | 2026-06-17 |
 
 ---
 
 *Roadmap created: 2026-06-04*
-*Last updated: 2026-06-06 — v2.0 Local Audio Transcription phases 4-6 appended*
+*Last updated: 2026-06-06 — Phase 6 plans created (3 plans, 3 waves)*

@@ -6,26 +6,56 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, set
 import { APIError as CerebrasAPIError } from '@cerebras/cerebras_cloud_sdk';
 import { APIError as GroqAPIError } from 'groq-sdk';
 import { createServer } from '../../index';
+import { config } from '../../config';
 import { resetForTesting } from '../../routing/provider-state';
+import type { AudioTranscriptionResult } from '../../types';
+import type { WhisperService } from '../../whisper-service';
 import { makeMockAdapter, resetMockAdapter } from './mock-adapters';
 import type { MockAdapter } from './mock-adapters';
 
 // Read proxy key from .env.test (loaded by bun test) — never hardcode
 const PROXY_KEY = process.env['PERSONAL_PROXY_API_KEY']!;
 
+type MockWhisperService = WhisperService & {
+    transcribeMock: ReturnType<typeof mock>;
+    healthMock: ReturnType<typeof mock>;
+};
+
 let server: ReturnType<typeof createServer>;
+let audioServer: ReturnType<typeof createServer>;
+let tinyServer: ReturnType<typeof createServer>;
 let mockCerebras: MockAdapter;
 let mockGroq: MockAdapter;
+let mockWhisper: MockWhisperService;
+
+function makeMockWhisperService(): MockWhisperService {
+    const transcribeMock = mock(async (_file: File, _alias: string): Promise<AudioTranscriptionResult> => ({
+        text: 'mock transcript',
+    }));
+    const healthMock = mock(async (): Promise<boolean> => true);
+    return {
+        transcribe: transcribeMock,
+        health: healthMock,
+        transcribeMock,
+        healthMock,
+    };
+}
 
 beforeAll(() => {
     mockCerebras = makeMockAdapter('cerebras');
     mockGroq = makeMockAdapter('groq');
+    mockWhisper = makeMockWhisperService();
     // port 0 = OS-assigned free port; read back via server.port
     server = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0);
+    audioServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper);
+    // TEST2-04: inject 100-byte file limit without lowering global transport ceiling
+    tinyServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper, 100);
 });
 
 afterAll(() => {
     server.stop(true);
+    audioServer.stop(true);
+    tinyServer.stop(true);
 });
 
 beforeEach(() => {
@@ -34,6 +64,12 @@ beforeEach(() => {
     // Restore default mock implementations after TEST-05's persistent overrides
     resetMockAdapter(mockCerebras);
     resetMockAdapter(mockGroq);
+    mockWhisper.transcribeMock.mockReset();
+    mockWhisper.transcribeMock.mockImplementation(async (_f: File, _a: string): Promise<AudioTranscriptionResult> => ({
+        text: 'mock transcript',
+    }));
+    mockWhisper.healthMock.mockReset();
+    mockWhisper.healthMock.mockImplementation(async () => true);
 });
 
 afterEach(() => {
@@ -55,6 +91,25 @@ async function post(body: object, extraHeaders?: Record<string, string>): Promis
             ...extraHeaders,
         },
         body: JSON.stringify(body),
+    });
+}
+
+function audioUrl(path: string): string {
+    return `http://127.0.0.1:${audioServer.port}${path}`;
+}
+
+async function postAudio(fields: Record<string, string | File>, extraHeaders?: Record<string, string>): Promise<Response> {
+    const formData = new FormData();
+    for (const [key, value] of Object.entries(fields)) {
+        formData.append(key, value);
+    }
+    return fetch(audioUrl('/v1/audio/transcriptions'), {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${PROXY_KEY}`,
+            ...extraHeaders,
+        },
+        body: formData,
     });
 }
 
@@ -422,6 +477,212 @@ describe('Integration: routing and streaming tests', () => {
         if (res.status === 413) {
             expect((await res.json() as any).error?.code).toBe('request_too_large');
         }
+    });
+
+});
+
+describe('Integration: optional model with DEFAULT_MODEL_ALIAS fallback', () => {
+    // Dedicated server + adapters so this block does not reuse a keep-alive socket
+    // left over from the preceding SSE streaming test (which can stall the next fetch).
+    let defaultServer: ReturnType<typeof createServer>;
+    let defaultCerebras: MockAdapter;
+    let defaultGroq: MockAdapter;
+
+    // config.defaultModelAlias is read live per-request in the chat handler.
+    // It is typed readonly (as const) but not frozen at runtime, so we mutate it
+    // around each test and restore the original value afterward.
+    const original = config.defaultModelAlias;
+
+    beforeAll(() => {
+        defaultCerebras = makeMockAdapter('cerebras');
+        defaultGroq = makeMockAdapter('groq');
+        defaultServer = createServer({ cerebras: defaultCerebras, groq: defaultGroq }, 0);
+    });
+
+    afterAll(() => {
+        defaultServer.stop(true);
+    });
+
+    beforeEach(() => {
+        resetForTesting();
+        resetMockAdapter(defaultCerebras);
+        resetMockAdapter(defaultGroq);
+    });
+
+    afterEach(() => {
+        (config as { defaultModelAlias: string | null }).defaultModelAlias = original;
+    });
+
+    function setDefaultAlias(value: string | null): void {
+        (config as { defaultModelAlias: string | null }).defaultModelAlias = value;
+    }
+
+    async function postDefault(body: object): Promise<Response> {
+        return fetch(`http://127.0.0.1:${defaultServer.port}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${PROXY_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
+
+    test('model omitted + DEFAULT_MODEL_ALIAS set → resolves to that alias (200)', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault({ messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { model?: string };
+        // resolved alias flows into normalized response model field
+        expect(body.model).toBe('gpt-oss-120b-balanced');
+    });
+
+    test('model omitted + no DEFAULT_MODEL_ALIAS → 400 with param=model', async () => {
+        setDefaultAlias(null);
+        const res = await postDefault({ messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { param?: string; code?: string } };
+        expect(body.error?.param).toBe('model');
+    });
+
+    test('explicit known alias → unchanged (200)', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault(validBody);
+        expect(res.status).toBe(200);
+        const body = await res.json() as { model?: string };
+        expect(body.model).toBe('gpt-oss-120b-balanced');
+    });
+
+    test('explicit unknown alias → still 400 model_not_found', async () => {
+        setDefaultAlias('gpt-oss-120b-balanced');
+        const res = await postDefault({ model: 'does-not-exist', messages: [{ role: 'user', content: 'hi' }] });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('model_not_found');
+    });
+});
+
+describe('Integration: audio transcription tests', () => {
+
+    test('TEST2-01: missing auth returns 401 with X-Request-ID', async () => {
+        const res = await fetch(audioUrl('/v1/audio/transcriptions'), { method: 'POST' });
+        expect(res.status).toBe(401);
+        expect(res.headers.get('X-Request-ID')).toBeTruthy();
+        const body = await res.json() as { error?: { type?: string } };
+        expect(body.error?.type).toBeDefined();
+    });
+
+    test('TEST2-02: missing file field returns 400', async () => {
+        const res = await postAudio({ model: 'whisper-1' });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { param?: string; code?: string } };
+        expect(body.error?.param === 'file' || body.error?.code).toBeTruthy();
+    });
+
+    test('TEST2-03: unknown model alias returns 400 model_not_found', async () => {
+        const res = await postAudio({
+            model: 'unknown-model',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error?.code).toBe('model_not_found');
+    });
+
+    test('TEST2-04: oversized file returns 413', async () => {
+        const bigFile = new File([new Uint8Array(101)], 'big.mp3', { type: 'audio/mpeg' });
+        const formData = new FormData();
+        formData.append('model', 'whisper-1');
+        formData.append('file', bigFile);
+        const res = await fetch(`http://127.0.0.1:${tinyServer.port}/v1/audio/transcriptions`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${PROXY_KEY}` },
+            body: formData,
+        });
+        expect(res.status).toBe(413);
+    });
+
+    test('TEST2-05: unknown field language returns 400', async () => {
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+            language: 'en',
+        } as Record<string, string | File>);
+        expect(res.status).toBe(400);
+    });
+
+    test('TEST2-06: successful transcription returns 200 with text only', async () => {
+        mockWhisper.transcribeMock.mockImplementationOnce(async () => ({ text: 'hello world' }));
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['hello audio'], 'test.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { text?: string };
+        expect(body.text).toBe('hello world');
+        expect(Object.keys(body).length).toBe(1);
+        expect(res.headers.get('X-Request-ID')).toBeTruthy();
+    });
+
+    test('TEST2-07: transcribe failure returns 503 service_unavailable', async () => {
+        mockWhisper.transcribeMock.mockImplementationOnce(async () => {
+            throw new Error('connection refused');
+        });
+        const res = await postAudio({
+            model: 'whisper-1',
+            file: new File(['x'], 't.mp3', { type: 'audio/mpeg' }),
+        });
+        expect(res.status).toBe(503);
+        const body = await res.json() as { error?: { code?: string } };
+        expect(body.error).toBeDefined();
+        expect(body.error?.code).toBe('service_unavailable');
+    });
+
+    test('EP2-02: GET /v1/models includes whisper alias and chat aliases', async () => {
+        const res = await fetch(audioUrl('/v1/models'), {
+            headers: { Authorization: `Bearer ${PROXY_KEY}` },
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { data?: Array<{ id: string }> };
+        const ids = (body.data ?? []).map((m) => m.id);
+        expect(ids).toContain('whisper-1');
+        expect(ids).toContain('gpt-oss-120b-balanced');
+    });
+
+    test('EP2-03: GET /ready whisperAvailable true when health mock succeeds', async () => {
+        mockWhisper.healthMock.mockImplementationOnce(async () => true);
+        const res = await fetch(audioUrl('/ready'));
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+            whisperAvailable?: boolean;
+            ready?: boolean;
+            mode?: string;
+            eligibleProviders?: string[];
+            unavailableProviders?: string[];
+        };
+        expect(body.whisperAvailable).toBe(true);
+        expect(body.ready).toBeDefined();
+        expect(body.mode).toBeDefined();
+        expect(Array.isArray(body.eligibleProviders)).toBe(true);
+        expect(Array.isArray(body.unavailableProviders)).toBe(true);
+    });
+
+    test('EP2-03: GET /ready whisperAvailable false without affecting chat readiness', async () => {
+        mockWhisper.healthMock.mockImplementationOnce(async () => false);
+        const res = await fetch(audioUrl('/ready'));
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+            whisperAvailable?: boolean;
+            ready?: boolean;
+            mode?: string;
+            eligibleProviders?: string[];
+            unavailableProviders?: string[];
+        };
+        expect(body.whisperAvailable).toBe(false);
+        expect(body.ready).toBeDefined();
+        expect(body.mode).toBeDefined();
+        expect(Array.isArray(body.eligibleProviders)).toBe(true);
+        expect(Array.isArray(body.unavailableProviders)).toBe(true);
     });
 
 });

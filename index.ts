@@ -3,6 +3,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { config } from './config';
 import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
+import { validateAudioFileSize, validateAudioTranscription } from './audio-schema';
 import { validateChatCompletion } from './request-schema';
 import { calcCooldownMs, classifyError, parseCerebrasHeaders, parseGroqHeaders } from './routing/cooldown-manager';
 import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure } from './routing/provider-state';
@@ -10,7 +11,9 @@ import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
 import { normalizeChunk, normalizeResponse } from './response-normalizer';
-import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
+import { HttpWhisperService, NoopWhisperService } from './whisper-service';
+import type { WhisperService } from './whisper-service';
+import type { AudioTranscriptionResult, CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
 
 // OBS-02: log level numeric map — error:0, warn:1, info:2
@@ -36,6 +39,18 @@ function openaiError(
     return new Response(
         JSON.stringify({ error: { message, type, code, param } }),
         { status, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+// D-12 (Phase 7): Gemini error shape — { error: { code, message, status } }, NO `type` field.
+// Distinct from openaiError above; used for EVERY error path on the /v1beta/.../:generateContent route
+// so a migrating n8n Gemini node sees Gemini-shaped errors, never OpenAI leakage (GEM-09, GEM-12).
+// `code` is the HTTP status (int); `status` is the Gemini UPPER_SNAKE_CASE token
+// (401→UNAUTHENTICATED, 400→INVALID_ARGUMENT, 503→UNAVAILABLE).
+function geminiError(code: number, message: string, status: string): Response {
+    return new Response(
+        JSON.stringify({ error: { code, message, status } }),
+        { status: code, headers: { 'Content-Type': 'application/json' } }
     );
 }
 
@@ -100,18 +115,21 @@ function hasVisibleChunkData(chunk: StreamChunk): boolean {
 // D-02: exported factory — importing index.ts does NOT bind a port
 export function createServer(
     adapters: Record<Provider, ProviderAdapter>,
-    port: number = config.port
+    port: number = config.port,
+    whisperService: WhisperService = new NoopWhisperService(),
+    audioMaxFileBytes: number = config.audioMaxFileBytes
 ): ReturnType<typeof Bun.serve> {
     return Bun.serve({
         hostname: config.hostname,
         port,
-        // WHSP-05: raise global body gate to audio ceiling (25 MiB); chat 1 MiB limit enforced in handler
-        maxRequestBodySize: config.audioMaxFileBytes,
+        // WHSP-05: transport gate = max(audio ceiling, chat ceiling); per-route limits enforced in handlers
+        maxRequestBodySize: Math.max(config.audioMaxFileBytes, config.maxRequestBodyBytes),
         async fetch(request, server) {
             // OBS-01: generate request ID at the very top — attached to every response
             const requestId = crypto.randomUUID();
             const requestStart = Date.now();
-            const { pathname } = new URL(request.url);
+            const url = new URL(request.url);
+            const { pathname } = url;
 
             // OBS-01: rebuild response with X-Request-ID header on every non-streaming return
             function withRequestId(response: Response): Response {
@@ -138,13 +156,196 @@ export function createServer(
                 const mode = !proxyKeyConfigured
                     ? 'not_configured'
                     : unavailableProviders.length === 0 ? 'ok' : 'degraded';
+                const whisperAvailable = await whisperService.health();
 
                 return withRequestId(new Response(
-                    JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders }),
+                    JSON.stringify({ ready, mode, eligibleProviders, unavailableProviders, whisperAvailable }),
                     {
                         status: ready ? 200 : 503,
                         headers: { 'Content-Type': 'application/json' },
                     }
+                ));
+            }
+
+            // POST /v1beta/models/{model}:generateContent — Gemini-wire-compatible transcription shim (Phase 7).
+            // Placed BEFORE the global Bearer gate (D-01): Gemini auth is ?key= / x-goog-api-key, not Bearer.
+            // OUT OF SCOPE (GEM-15): :streamGenerateContent (Gemini SSE — falls through to the 404 handler),
+            //   file_data Files-API URIs (rejected as 400 below), and multi-candidate responses
+            //   (always a single candidate at index 0). Do not implement here.
+            if (
+                request.method === 'POST'
+                && pathname.startsWith('/v1beta/models/')
+                && pathname.endsWith(':generateContent')
+            ) {
+                const model = pathname.slice(
+                    '/v1beta/models/'.length,
+                    pathname.length - ':generateContent'.length
+                );
+
+                // 1. Auth (D-03/D-04, GEM-02/09): x-goog-api-key header first, then ?key= query param.
+                //    Missing config OR missing/invalid key → Gemini-shaped 401 (NOT openaiError).
+                const apiKey = request.headers.get('x-goog-api-key')
+                    ?? url.searchParams.get('key');
+                if (
+                    !config.personalProxyApiKey
+                    || !apiKey
+                    || !verifyToken(apiKey, config.personalProxyApiKey)
+                ) {
+                    return withRequestId(geminiError(
+                        401,
+                        'API key not valid. Please pass a valid API key.',
+                        'UNAUTHENTICATED'
+                    ));
+                }
+
+                // IN-02: sanity-bound the echoed model segment (post-auth so we don't reveal
+                // anything to unauthenticated callers). It is echoed into modelVersion and logs;
+                // reject path-injecting or absurdly long values before doing any work.
+                if (model.length === 0 || model.includes('/') || model.length > 200) {
+                    return withRequestId(geminiError(
+                        400,
+                        'Invalid model identifier.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 2. Parse JSON body (D-07 step 2).
+                let body: unknown;
+                try {
+                    body = await request.json();
+                } catch {
+                    return withRequestId(geminiError(
+                        400,
+                        'Invalid JSON request body.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 3. Scan parts (D-05/D-07): file_data anywhere → out-of-scope 400 (GEM-04);
+                //    else capture the FIRST inline_data part with both data and mime_type.
+                //    WR-02: typed narrowing on `unknown` instead of `any` so strict-mode /
+                //    noUncheckedIndexedAccess guarantees still apply to every property access.
+                const rawContents = (body as { contents?: unknown } | null | undefined)?.contents;
+                const contents: unknown[] = Array.isArray(rawContents) ? rawContents : [];
+                let inlineData: { data: string; mime_type: string } | null = null;
+                for (const content of contents) {
+                    const rawParts = (content as { parts?: unknown } | null | undefined)?.parts;
+                    const parts: unknown[] = Array.isArray(rawParts) ? rawParts : [];
+                    for (const part of parts) {
+                        const partObj = part as { file_data?: unknown; inline_data?: unknown } | null | undefined;
+                        // WR-04: reject only when file_data is truthy — a `{ file_data: null }`
+                        // part that also carries valid inline_data must not be falsely rejected.
+                        if (partObj && partObj.file_data) {
+                            return withRequestId(geminiError(
+                                400,
+                                'file_data (Files API) input is not supported by this proxy.',
+                                'INVALID_ARGUMENT'
+                            ));
+                        }
+                        const id = partObj?.inline_data as { data?: unknown; mime_type?: unknown } | null | undefined;
+                        if (!inlineData && id
+                            && typeof id.data === 'string' && id.data
+                            && typeof id.mime_type === 'string' && id.mime_type) {
+                            inlineData = { data: id.data, mime_type: id.mime_type };
+                        }
+                    }
+                }
+
+                // 4. No inline audio part found → Gemini-shaped 400 (GEM-10).
+                if (!inlineData) {
+                    return withRequestId(geminiError(
+                        400,
+                        'No inline audio data found in request.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 5. Decode base64 → File using native Buffer + File only (D-06, GEM-13).
+                //    Filename is the literal 'audio' — never derived from untrusted input.
+                //    WR-01: bound the *encoded* length before allocating the decoded buffer.
+                //    base64 length * 3/4 ≈ decoded byte count, a safe upper-bound proxy, so an
+                //    oversize payload is rejected before the ~18 MiB decode allocation (DoS).
+                const approxBytes = Math.floor(inlineData.data.length * 3 / 4);
+                if (approxBytes > audioMaxFileBytes) {
+                    return withRequestId(geminiError(
+                        400,
+                        `File too large. Maximum allowed size is ${audioMaxFileBytes} bytes.`,
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+                const bytes = Buffer.from(inlineData.data, 'base64');
+                // HG-01: reject empty/zero-length decoded audio. Buffer.from(..., 'base64') is
+                // lenient (never throws, silently drops non-alphabet chars), so garbage or
+                // whitespace-only input can decode to 0 bytes and otherwise reach the sidecar.
+                if (bytes.length === 0) {
+                    return withRequestId(geminiError(
+                        400,
+                        'Inline audio data is empty or not valid base64.',
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+                const file = new File([bytes], 'audio', { type: inlineData.mime_type });
+
+                // 6. Size check (D-07/GEM-11) — reuse validateAudioFileSize.
+                const sizeCheck = validateAudioFileSize(file, audioMaxFileBytes);
+                if (!sizeCheck.ok) {
+                    return withRequestId(geminiError(
+                        400,
+                        sizeCheck.message,
+                        'INVALID_ARGUMENT'
+                    ));
+                }
+
+                // 7. Transcribe (D-08/D-13). Do NOT require model === whisperModelAlias.
+                let result: AudioTranscriptionResult;
+                try {
+                    result = await whisperService.transcribe(file, config.whisperModelAlias ?? model);
+                } catch {
+                    log('warn', {
+                        event: 'gemini_transcription_failed',
+                        requestId,
+                        route: `${request.method} ${pathname}`,
+                        modelAlias: model,
+                        fileSize: file.size,
+                        status: 503,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(geminiError(
+                        503,
+                        'Transcription service is unavailable.',
+                        'UNAVAILABLE'
+                    ));
+                }
+
+                // 8. Success body (D-09/D-10/D-11). Estimated token counts; echo model in modelVersion.
+                const estTokens = Math.ceil(result.text.length / 4);
+                log('info', {
+                    event: 'gemini_transcription_complete',
+                    requestId,
+                    timestamp: new Date(requestStart).toISOString(),
+                    route: `${request.method} ${pathname}`,
+                    modelAlias: model,
+                    fileSize: file.size,
+                    status: 200,
+                    latencyMs: Date.now() - requestStart,
+                });
+                return withRequestId(new Response(
+                    JSON.stringify({
+                        candidates: [
+                            {
+                                content: { role: 'model', parts: [{ text: result.text }] },
+                                finishReason: 'STOP',
+                                index: 0,
+                            },
+                        ],
+                        usageMetadata: {
+                            promptTokenCount: 0,
+                            candidatesTokenCount: estTokens,
+                            totalTokenCount: estTokens,
+                        },
+                        modelVersion: model,
+                    }),
+                    { status: 200, headers: { 'Content-Type': 'application/json' } }
                 ));
             }
 
@@ -164,6 +365,97 @@ export function createServer(
                 ));
             }
 
+            // POST /v1/audio/transcriptions — multipart transcription endpoint (EP2-01)
+            if (request.method === 'POST' && pathname === '/v1/audio/transcriptions') {
+                let formData: FormData;
+                try {
+                    formData = await request.formData();
+                } catch {
+                    return withRequestId(openaiError(
+                        'Failed to parse multipart form data.',
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        null,
+                        400
+                    ));
+                }
+
+                const rawInput: Record<string, unknown> = {};
+                for (const [key, value] of formData.entries()) {
+                    rawInput[key] = value;
+                }
+
+                const validation = validateAudioTranscription(rawInput);
+                if (!validation.success) {
+                    return withRequestId(openaiError(
+                        validation.message,
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        validation.param,
+                        400
+                    ));
+                }
+
+                const input = validation.data;
+
+                const sizeCheck = validateAudioFileSize(input.file, audioMaxFileBytes);
+                if (!sizeCheck.ok) {
+                    return withRequestId(openaiError(
+                        sizeCheck.message,
+                        'invalid_request_error',
+                        'request_too_large',
+                        'file',
+                        413
+                    ));
+                }
+
+                const isKnownWhisperAlias = config.whisperModelAlias !== null
+                    && input.model === config.whisperModelAlias;
+                if (!isKnownWhisperAlias) {
+                    return withRequestId(openaiError(
+                        `Unknown model '${input.model}'.`,
+                        'invalid_request_error',
+                        'model_not_found',
+                        'model',
+                        400
+                    ));
+                }
+
+                try {
+                    const result = await whisperService.transcribe(input.file, input.model);
+                    log('info', {
+                        event: 'transcription_complete',
+                        requestId,
+                        timestamp: new Date(requestStart).toISOString(),
+                        route: `${request.method} ${pathname}`,
+                        modelAlias: input.model,
+                        fileSize: input.file.size,
+                        status: 200,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(new Response(JSON.stringify(result), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    }));
+                } catch {
+                    log('warn', {
+                        event: 'transcription_failed',
+                        requestId,
+                        modelAlias: input.model,
+                        fileSize: input.file.size,
+                        status: 503,
+                        latencyMs: Date.now() - requestStart,
+                    });
+                    return withRequestId(openaiError(
+                        'Transcription service is unavailable.',
+                        'server_error',
+                        'service_unavailable',
+                        null,
+                        503
+                    ));
+                }
+            }
+
             if (request.method === 'GET' && pathname === '/internal/providers/status') {
                 if (!config.enableInternalStatusEndpoint) {
                     // NORM-10: OpenAI error shape for disabled internal endpoint
@@ -176,18 +468,24 @@ export function createServer(
                 ));
             }
 
-            // GET /v1/models — list logical proxy aliases only (REG-04; EP-03)
+            // GET /v1/models — list logical proxy aliases only (REG-04; EP-03; EP2-02)
             if (request.method === 'GET' && pathname === '/v1/models') {
+                const data = listAliases().map((id) => ({
+                    id,
+                    object: 'model',
+                    created: 0,
+                    owned_by: 'personal-proxy',
+                }));
+                if (config.whisperModelAlias !== null) {
+                    data.push({
+                        id: config.whisperModelAlias,
+                        object: 'model',
+                        created: 0,
+                        owned_by: 'personal-proxy',
+                    });
+                }
                 return withRequestId(new Response(
-                    JSON.stringify({
-                        object: 'list',
-                        data: listAliases().map((id) => ({
-                            id,
-                            object: 'model',
-                            created: 0,
-                            owned_by: 'personal-proxy',
-                        })),
-                    }),
+                    JSON.stringify({ object: 'list', data }),
                     { status: 200, headers: { 'Content-Type': 'application/json' } }
                 ));
             }
@@ -282,10 +580,23 @@ export function createServer(
 
                 const input = validation.data;
 
-                // VALID-01: unknown model alias — reject before any upstream call
-                if (!isKnownAlias(input.model)) {
+                // OPT-IN default alias: client may omit `model`; fall back to DEFAULT_MODEL_ALIAS.
+                // When neither is present, reject before any upstream call.
+                const requestedModel = input.model ?? config.defaultModelAlias ?? undefined;
+                if (requestedModel === undefined) {
                     return withRequestId(openaiError(
-                        `Unknown model '${input.model}'.`,
+                        'Missing required parameter: model (and no DEFAULT_MODEL_ALIAS configured).',
+                        'invalid_request_error',
+                        'invalid_request_error',
+                        'model',
+                        400
+                    ));
+                }
+
+                // VALID-01: unknown model alias — reject before any upstream call
+                if (!isKnownAlias(requestedModel)) {
+                    return withRequestId(openaiError(
+                        `Unknown model '${requestedModel}'.`,
                         'invalid_request_error',
                         'model_not_found',
                         'model',
@@ -305,7 +616,7 @@ export function createServer(
                     seed: input.seed ?? null,
                 };
 
-                const candidates = chooseEligibleProviders(input.model);
+                const candidates = chooseEligibleProviders(requestedModel);
                 // WR-02: do NOT advance cursor unconditionally here — cursor is advanced after
                 // each failed provider attempt so that on recovery the next request starts from
                 // the provider after the one that last failed, not from a stale pre-eligibility-check position.
@@ -316,7 +627,7 @@ export function createServer(
                         requestId,
                         timestamp: new Date(requestStart).toISOString(),
                         route: `${request.method} ${pathname}`,
-                        logicalAlias: input.model,
+                        logicalAlias: requestedModel,
                         provider: null,
                         upstreamModelId: null,
                         attempt: 0,
@@ -346,7 +657,7 @@ export function createServer(
                     let failoverReason: string | null = null;
 
                     for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                        const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                        const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
                         if (!upstreamModelId) continue;
                         const adapter = adapters[provider];
                         attemptCount++;
@@ -416,7 +727,7 @@ export function createServer(
                             requestId,
                             timestamp: new Date(requestStart).toISOString(),
                             route: `${request.method} ${pathname}`,
-                            logicalAlias: input.model,
+                            logicalAlias: requestedModel,
                             provider: null,
                             upstreamModelId: null,
                             attempt: attemptCount,
@@ -459,7 +770,7 @@ export function createServer(
                                     continue; // terminal usage chunk — not forwarded downstream
                                 }
 
-                                const normalized = normalizeChunk(chunk, input.model);
+                                const normalized = normalizeChunk(chunk, requestedModel);
                                 if (!hasVisibleChunkData(normalized)) {
                                     continue;
                                 }
@@ -486,7 +797,7 @@ export function createServer(
                                 requestId,
                                 timestamp: new Date(requestStart).toISOString(),
                                 route: `${request.method} ${pathname}`,
-                                logicalAlias: input.model,
+                                logicalAlias: requestedModel,
                                 provider: finalProvider,
                                 upstreamModelId: finalUpstreamModelId,
                                 attempt: finalAttemptCount,
@@ -516,7 +827,7 @@ export function createServer(
                                 requestId,
                                 timestamp: new Date(requestStart).toISOString(),
                                 route: `${request.method} ${pathname}`,
-                                logicalAlias: input.model,
+                                logicalAlias: requestedModel,
                                 provider: finalProvider,
                                 upstreamModelId: finalUpstreamModelId,
                                 attempt: finalAttemptCount,
@@ -553,7 +864,7 @@ export function createServer(
                 let failoverReason: string | null = null;
 
                 for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                    const upstreamModelId = resolveUpstreamModel(input.model, provider);
+                    const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
                     if (!upstreamModelId) continue;
                     const adapter = adapters[provider];
                     attempt++;
@@ -572,7 +883,7 @@ export function createServer(
                             log('warn', { event: 'usage_missing', provider, requestId });
                         }
 
-                        const normalized = normalizeResponse(result, input.model);
+                        const normalized = normalizeResponse(result, requestedModel);
 
                         // OBS-02: request-completion log for non-streaming success
                         log('info', {
@@ -580,7 +891,7 @@ export function createServer(
                             requestId,
                             timestamp: new Date(requestStart).toISOString(),
                             route: `${request.method} ${pathname}`,
-                            logicalAlias: input.model,
+                            logicalAlias: requestedModel,
                             provider,
                             upstreamModelId,
                             attempt,
@@ -660,7 +971,7 @@ export function createServer(
                     requestId,
                     timestamp: new Date(requestStart).toISOString(),
                     route: `${request.method} ${pathname}`,
-                    logicalAlias: input.model,
+                    logicalAlias: requestedModel,
                     provider: null,
                     upstreamModelId: null,
                     attempt,
@@ -688,6 +999,13 @@ export function createServer(
 
 // Entrypoint guard — bun index.ts boots the server; import { createServer } from './index' does not
 if (import.meta.main) {
-    const server = createServer({ cerebras: cerebrasAdapter, groq: groqAdapter });
+    const whisperService = config.whisperModelAlias !== null
+        ? new HttpWhisperService()
+        : new NoopWhisperService();
+    const server = createServer(
+        { cerebras: cerebrasAdapter, groq: groqAdapter },
+        config.port,
+        whisperService
+    );
     console.log(`Server is running on ${server.url}`);
 }

@@ -17,6 +17,27 @@ describe("validateChatCompletion", () => {
         }
     });
 
+    test("omitted model now PASSES schema validation (model is optional)", () => {
+        const result = validateChatCompletion({
+            messages: [{ role: "user", content: "hi" }],
+        });
+        expect(result.success).toBe(true);
+        if (result.success) {
+            expect(result.data.model).toBeUndefined();
+        }
+    });
+
+    test("explicit model string still validates", () => {
+        const result = validateChatCompletion({
+            model: "gpt-oss-120b-balanced",
+            messages: [{ role: "user", content: "hi" }],
+        });
+        expect(result.success).toBe(true);
+        if (result.success) {
+            expect(result.data.model).toBe("gpt-oss-120b-balanced");
+        }
+    });
+
     test("missing messages returns success:false with param='messages'", () => {
         const result = validateChatCompletion({ model: "x" });
         expect(result.success).toBe(false);
