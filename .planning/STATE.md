@@ -25,8 +25,8 @@ progress:
 
 Phase: 7 (Gemini-Compatible Transcription Shim)
 Plan: All complete
-Status: Phase 7 complete — verification passed (4/4 must-haves); milestone v2.0 complete
-Last activity: 2026-06-17 - Completed quick task 260617-g3v: Embed whisper-server sidecar in Docker container
+Status: Milestone v2.0 shipped — PR #1 (phases 5–7 + whisper sidecar) → master
+Last activity: 2026-06-17 - Shipped milestone v2.0 — PR #1
 
 Progress bar: ██████████ 100% (7/7 phases)
 
