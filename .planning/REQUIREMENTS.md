@@ -96,6 +96,41 @@
 
 ---
 
+## Milestone v3.0 — Gemini-Compatible Transcription Shim
+
+**Goal:** A new route `POST /v1beta/models/{model}:generateContent` wire-compatible with Google's Gemini generateContent for audio transcription, so existing n8n nodes migrate by changing only the base URL and API key. Reuses the existing WhisperService — zero new npm packages.
+
+### Endpoint & Auth
+
+- [ ] **GEM-01**: User can POST to `/v1beta/models/{model}:generateContent` and reach a transcription handler
+- [ ] **GEM-02**: Auth accepted via `?key=` query param OR `x-goog-api-key` header, validated against `PERSONAL_PROXY_API_KEY` (constant-time)
+- [ ] **GEM-09**: Errors on this route use Gemini shape `{ "error": { "code", "message", "status" } }` — never the OpenAI `{error:{type,...}}` shape
+
+### Request Handling
+
+- [ ] **GEM-03**: Handler parses Gemini body, extracts first `inline_data` audio part (base64 + mime_type), decodes to a `File`
+- [ ] **GEM-04**: `file_data` (Files-API URI) parts are rejected as out-of-scope with a Gemini-shaped 400
+- [ ] **GEM-05**: Decoded audio runs through the existing `WhisperService.transcribe`
+- [ ] **GEM-10**: A request with no audio part (text-only / missing inline_data) returns a Gemini-shaped 400
+- [ ] **GEM-11**: Oversize audio (over `AUDIO_MAX_FILE_BYTES`) returns a Gemini-shaped error
+
+### Response
+
+- [ ] **GEM-06**: Success returns `{ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP", index: 0 }] }`
+- [ ] **GEM-07**: Response includes `usageMetadata` with `totalTokenCount` (counts may be estimated/zero)
+- [ ] **GEM-08**: Response includes `modelVersion` echoing the requested model id
+- [ ] **GEM-12**: No OpenAI fields leak into the Gemini response body (`text`, `choices` absent)
+
+### Constraints & Regression
+
+- [ ] **GEM-13**: Zero new npm packages; base64 decode + FormData via Bun runtime only
+- [ ] **GEM-14**: Existing `/v1/*` OpenAI endpoints (chat, models, audio/transcriptions) remain unchanged
+- [ ] **GEM-15**: `:streamGenerateContent` is explicitly out of scope for this milestone (documented, not implemented)
+
+**TDD basis:** `tests/integration/gemini-compat.test.ts` — `describe.skip('Phase 7 TARGET: ...')` block holds the acceptance spec (GEM-01..10). Un-skip at execution start; build until green.
+
+---
+
 ## v1.0 Validated Requirements
 
 All 76 v1.0 requirements validated:
