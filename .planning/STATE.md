@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
 status: completed
-last_updated: "2026-06-17T03:54:33.100Z"
-last_activity: 2026-06-06
+last_updated: "2026-06-17T04:10:00.000Z"
+last_activity: 2026-06-17
 progress:
   total_phases: 7
   completed_phases: 7
@@ -23,12 +23,12 @@ progress:
 
 ## Current Position
 
-Phase: 6 (final)
+Phase: 7 (Gemini-Compatible Transcription Shim)
 Plan: All complete
-Status: Milestone v2.0 complete
-Last activity: 2026-06-06
+Status: Phase 7 complete — verification passed (4/4 must-haves); milestone v2.0 complete
+Last activity: 2026-06-17
 
-Progress bar: ██████████ 100% (3/3 phases)
+Progress bar: ██████████ 100% (7/7 phases)
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress bar: ██████████ 100% (3/3 phases)
 - **v2.0:** Phase 5 gates: 100% TEST2-xx coverage against mocked WhisperService before touching real binary
 - **v2.0:** maxRequestBodySize raised to audio limit in Bun.serve(); chat-completion 1 MiB limit enforced at validation layer
 - **Phase 6:** HttpWhisperService activates only when WHISPER_MODEL_ALIAS is set; lives in whisper-service.ts; inline entrypoint wiring; boot never blocked by sidecar health
+- **Phase 7:** Gemini-compat `POST /v1beta/models/{model}:generateContent` route placed BEFORE the global Bearer gate (uses `?key=`/`x-goog-api-key`, not Bearer); reuses injected WhisperService; per-route `geminiError()` factory keeps wire shapes isolated; URL `{model}` not required to equal WHISPER_MODEL_ALIAS (preserves n8n URL-swap migration); zero new npm packages (native Buffer+File base64 decode)
 
 ### Todos
 
@@ -67,8 +68,8 @@ None
 
 ## Session Continuity
 
-**Last action:** Phase 6 discuss-phase — CONTEXT.md captured (boot wiring decisions)
-**Next action:** Run `/gsd:plan-phase 6` to decompose Phase 6 into executable plans
+**Last action:** Phase 7 complete — discuss → plan → execute → code review (1 HIGH + findings fixed) → verification passed (4/4). Full suite 104/104 green; zero new deps.
+**Next action:** None pending. Phase 7 done. (Optional: live n8n-node smoke test against a running whisper sidecar — confirmation only, not a gate.)
 **Resume file:** None
 
 ---
