@@ -199,7 +199,7 @@ export function createServer(
                 }
 
                 // 2. Parse JSON body (D-07 step 2).
-                let body: any;
+                let body: unknown;
                 try {
                     body = await request.json();
                 } catch {
@@ -212,20 +212,29 @@ export function createServer(
 
                 // 3. Scan parts (D-05/D-07): file_data anywhere → out-of-scope 400 (GEM-04);
                 //    else capture the FIRST inline_data part with both data and mime_type.
-                const contents: any[] = Array.isArray(body?.contents) ? body.contents : [];
+                //    WR-02: typed narrowing on `unknown` instead of `any` so strict-mode /
+                //    noUncheckedIndexedAccess guarantees still apply to every property access.
+                const rawContents = (body as { contents?: unknown } | null | undefined)?.contents;
+                const contents: unknown[] = Array.isArray(rawContents) ? rawContents : [];
                 let inlineData: { data: string; mime_type: string } | null = null;
                 for (const content of contents) {
-                    const parts: any[] = Array.isArray(content?.parts) ? content.parts : [];
+                    const rawParts = (content as { parts?: unknown } | null | undefined)?.parts;
+                    const parts: unknown[] = Array.isArray(rawParts) ? rawParts : [];
                     for (const part of parts) {
-                        if (part && 'file_data' in part) {
+                        const partObj = part as { file_data?: unknown; inline_data?: unknown } | null | undefined;
+                        // WR-04: reject only when file_data is truthy — a `{ file_data: null }`
+                        // part that also carries valid inline_data must not be falsely rejected.
+                        if (partObj && partObj.file_data) {
                             return withRequestId(geminiError(
                                 400,
                                 'file_data (Files API) input is not supported by this proxy.',
                                 'INVALID_ARGUMENT'
                             ));
                         }
-                        const id = part?.inline_data;
-                        if (!inlineData && id && id.data && id.mime_type) {
+                        const id = partObj?.inline_data as { data?: unknown; mime_type?: unknown } | null | undefined;
+                        if (!inlineData && id
+                            && typeof id.data === 'string' && id.data
+                            && typeof id.mime_type === 'string' && id.mime_type) {
                             inlineData = { data: id.data, mime_type: id.mime_type };
                         }
                     }
