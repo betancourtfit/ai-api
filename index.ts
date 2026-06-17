@@ -13,7 +13,7 @@ import { groqAdapter } from './services/groq';
 import { normalizeChunk, normalizeResponse } from './response-normalizer';
 import { HttpWhisperService, NoopWhisperService } from './whisper-service';
 import type { WhisperService } from './whisper-service';
-import type { CompletionParams, ProviderAdapter, StreamChunk } from './types';
+import type { AudioTranscriptionResult, CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
 
 // OBS-02: log level numeric map — error:0, warn:1, info:2
@@ -286,7 +286,7 @@ export function createServer(
                 }
 
                 // 7. Transcribe (D-08/D-13). Do NOT require model === whisperModelAlias.
-                let result: { text: string };
+                let result: AudioTranscriptionResult;
                 try {
                     result = await whisperService.transcribe(file, config.whisperModelAlias ?? model);
                 } catch {
