@@ -26,7 +26,7 @@ progress:
 Phase: 08 (hexagonal-architecture-audit-refactor) — COMPLETE
 Plan: 4 of 4
 Status: Verified (15/15 requirements, 119/119 tests, UAT 3/3 live) and secured (24/24 threats closed). Milestone v2.0 has no phases remaining.
-Last activity: 2026-07-24 -- Completed quick task 260724-p04: CI minimum (6 tsc errors fixed, typecheck script, .github/workflows/ci.yml green on master)
+Last activity: 2026-07-24 -- Completed quick task 260724-rp0: Dockerfile bumped to Bun 1.3.11 (killed silent dependency drift in the production image) + CI docker-image job auditing the image against bun.lock
 
 Progress bar: ██████████ 100% (8/8 phases)
 
@@ -78,6 +78,7 @@ None
 |---|-------------|------|--------|--------|-----------|
 | 260617-g3v | Embed whisper-server sidecar in Docker container (single image, two processes) for EasyPanel deploy | 2026-06-17 | 43008ea | Verified | [260617-g3v-embed-whisper-server-sidecar-in-docker-c](./quick/260617-g3v-embed-whisper-server-sidecar-in-docker-c/) |
 | 260724-p04 | CI minimum: fix 6 tsc errors + `.github/workflows/ci.yml` (install, typecheck, test, secret-env guard) | 2026-07-24 | 7b6fa6f | Verified | [260724-p04-ci-minimo-fix-errores-tsc-en-tests-workf](./quick/260724-p04-ci-minimo-fix-errores-tsc-en-tests-workf/) |
+| 260724-rp0 | Dockerfile Bun 1.1.29 → 1.3.11 (killed silent dependency drift) + CI `docker-image` job auditing the image against `bun.lock` | 2026-07-24 | 2e937cb | Verified | [260724-rp0-dockerfile-bun-1-3-11-job-de-build-de-im](./quick/260724-rp0-dockerfile-bun-1-3-11-job-de-build-de-im/) |
 | Phase 08 P01 | 9 min | 4 tasks | 2 files |
 | Phase 08 P02 | 24 min | 6 tasks | 18 files |
 | Phase 08 P03 | 22 min | 5 tasks | 27 files |
@@ -87,14 +88,15 @@ None
 
 **Last action:** Phase 8 closed out. Executed (4 plans, 24 commits, `index.ts` 1,012 → 22 LOC, layers at `domain/ application/ adapters/ composition/`, 48 modules, 8 executable boundary guards, zero new deps, 111 → 119 tests). Verified 15/15 requirements. UAT 3/3 walked against **live** Cerebras and Groq — non-streaming, streaming SSE with a single `[DONE]`, and A-B-A-B round-robin alternation with no key material in `/internal/providers/status`. Security audit SECURED: 24/24 threats closed, `threats_open: 0`.
 **Then:** Quick task 260724-p04 wired the CI minimum — `bunx tsc --noEmit` 6 errors → 0 (one production line: a `FormData` annotation in `adapters/inbound/http/routes/transcriptions.ts`), a `typecheck` script, and `.github/workflows/ci.yml` running install → typecheck → test → tracked-secret-env guard. Green on three real Actions runs on master, and `verify` is now a required check via repository ruleset `require-ci-on-master` (admin bypass on, so direct pushes by the owner still work).
-**Next action:** Milestone v2.0 has no phases remaining — `/gsd-complete-milestone` to archive, or `/gsd-new-milestone` to open the next one. Deploy-side follow-up available: escalón 2 of the CI/CD proposal (build the image in CI → GHCR → EasyPanel pulls it), which also resolves the Dockerfile Bun drift noted in carried-forward debt.
+**Then:** Quick task 260724-rp0 fixed the Dockerfile Bun pin (both stages → 1.3.11) and added a `docker-image` CI job that builds the production image on master and fails if its installed deps drift from `bun.lock`. Verified on run `30132968460`: `verify` 14s, `docker-image` 239s, audit printed `OK @cerebras/cerebras_cloud_sdk@1.64.1` and `OK groq-sdk@1.2.1` from inside the real image.
+**Next action:** Milestone v2.0 has no phases remaining — `/gsd-complete-milestone` to archive, or `/gsd-new-milestone` to open the next one. Deploy-side follow-up ready and scoped: publish the (already building, already audited) image to GHCR tagged by SHA, switch EasyPanel from build-from-git to deploy-image, and add a post-deploy smoke against `/health` (which already returns `ok <sha>`). That is what gets the whisper.cpp compile off the mini PC and makes rollback a retag instead of a 15-minute rebuild.
 **Resume file:** None
 
 ### Carried-forward debt (from Phase 8)
 
 - Upstream abort on client disconnect is unverified — UAT confirmed the server survives a mid-stream disconnect, not that the provider request is actually cancelled. Wastes quota if broken; no data exposure.
 - The 429 cooldown / failover path never ran against a real provider; covered by mock-based tests only.
-- ~~`bunx tsc --noEmit` reports 7 pre-existing errors and no typecheck gate is wired into CI.~~ **CLEARED by quick task 260724-p04** (it was 6 errors, not 7; all fixed, and `.github/workflows/ci.yml` now gates install/typecheck/test/secret-env on every push to master and every PR). `verify` is required on master by repository ruleset `require-ci-on-master` (id 19711116), with repository-admin bypass so direct pushes by the owner still work. One item remains open from that task: the `Dockerfile` still pins `oven/bun:1.1.29`, which predates the text `bun.lock` format (Bun v1.1.39+) — its `RUN bun install --frozen-lockfile` is at risk on a clean EasyPanel build, which is why CI pins 1.3.11 instead.
+- ~~`bunx tsc --noEmit` reports 7 pre-existing errors and no typecheck gate is wired into CI.~~ **CLEARED by quick task 260724-p04** (it was 6 errors, not 7; all fixed, and `.github/workflows/ci.yml` now gates install/typecheck/test/secret-env on every push to master and every PR). `verify` is required on master by repository ruleset `require-ci-on-master` (id 19711116), with repository-admin bypass so direct pushes by the owner still work. The Dockerfile Bun drift noted here was then investigated and closed by quick task 260724-rp0 — and it was worse than "at risk": Bun 1.1.29 did not fail on the text `bun.lock`, it ignored it silently, so the production image was running Cerebras SDK 1.91.0 while the tests validate 1.64.1. Both stages are now on `oven/bun:1.3.11` and a `docker-image` CI job asserts the image's installed versions against `bun.lock` on every push to master.
 - `dist/index.js` is a stale pre-Phase-1 build artifact still in the tree.
 - The new use cases are headlessly testable but have no direct unit tests yet.
 
