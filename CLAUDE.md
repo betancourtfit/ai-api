@@ -800,7 +800,16 @@ Example degraded but ready response:
 
 ---
 
-## 21. Suggested architecture
+## 21. Architecture
+
+> **Superseded by [`ARCHITECTURE.md`](./ARCHITECTURE.md) (repo root), which is the authoritative
+> layering contract as of Phase 8.** The concern list below is still accurate; the `src/…` module
+> sketch that followed it was never built and has been replaced by the hexagonal layout
+> (`domain/`, `application/`, `adapters/`, `composition/` — no `src/`). Every concern named here
+> survives, relocated: `routes/` → `adapters/inbound/http/routes/`, `middleware/` →
+> `adapters/inbound/http/middleware/`, `providers/` → `adapters/outbound/`, `schemas/` →
+> `adapters/inbound/http/schemas/`, `routing/` → `domain/provider-state.ts` +
+> `domain/rate-limits.ts` + `domain/failure-classification.ts`.
 
 ```text
 Client
@@ -827,44 +836,27 @@ Cerebras                       Groq
 https://api.cerebras.ai/v1     https://api.groq.com/openai/v1
 ```
 
-Recommended modules:
+Actual module layout (see `ARCHITECTURE.md` §4 for the annotated tree):
 
 ```text
-src/
-  app.*
-  config.*
-  routes/
-    health.*
-    ready.*
-    models.*
-    chat-completions.*
-    providers-status.*
-  middleware/
-    auth.*
-    request-id.*
-  routing/
-    provider-router.*
-    provider-state.*
-    cooldown-manager.*
-  providers/
-    provider-adapter.*
-    cerebras-adapter.*
-    groq-adapter.*
-  services/
-    model-registry.*
-    response-normalizer.*
-    stream-relay.*
-  schemas/
-    chat-completions.*
-  utils/
-    errors.*
-    logger.*
-tests/
-  unit/
-  integration/
+domain/          types · errors · normalization · model-registry · rate-limits
+                 failure-classification · provider-state · audio-limits
+application/
+  ports/         chat-provider · transcription · provider-state-store · clock · logger
+  use-cases/     create-chat-completion · stream-chat-completion · transcribe-audio
+                 list-models · get-readiness · get-provider-status
+adapters/
+  inbound/http/  server · router · read-limited-body · middleware/ · routes/ · presenters/ · schemas/
+  outbound/      cerebras-chat-provider · groq-chat-provider · sdk-error-mapper
+                 http-whisper · noop-whisper · console-logger · system-clock
+composition/     container.ts
+config.ts        loadConfig() + the default instance
+index.ts         entrypoint + `export { createServer }`
+tests/           architecture/ · domain/ · adapters/ · unit/ · integration/
 ```
 
-Keep provider-specific behavior isolated inside adapters.
+Keep provider-specific behavior isolated inside adapters. `adapters/outbound/sdk-error-mapper.ts`
+is the only module permitted to name a vendor SDK error class.
 
 ---
 
@@ -1086,8 +1078,8 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 
 ## Key Dependencies
 
-- `@cerebras/cerebras_cloud_sdk` ^1.59.0 (resolved 1.59.0) — official Cerebras inference SDK; used in `services/cerebras.ts`
-- `groq-sdk` ^0.37.0 (resolved 0.37.0) — official Groq SDK; used in `services/groq.ts`
+- `@cerebras/cerebras_cloud_sdk` ^1.59.0 (resolved 1.59.0) — official Cerebras inference SDK; used in `adapters/outbound/cerebras-chat-provider.ts`
+- `groq-sdk` ^0.37.0 (resolved 0.37.0) — official Groq SDK; used in `adapters/outbound/groq-chat-provider.ts`
 - `cerebras` ^1.2.7 — a separate Cerebras CLI/native binary package listed alongside `@cerebras/cerebras_cloud_sdk`; only `@cerebras/cerebras_cloud_sdk` is imported in source code. The `cerebras` package installs platform-specific native binaries (`cerebras-darwin-arm64`, etc.) and a `cerebras` CLI binary. It appears unused at the application level.
 - `@types/bun` latest (resolved 1.3.5) — TypeScript types for the Bun runtime API
 - `typescript` ^5 — TypeScript compiler (not explicitly installed, provided by environment)
@@ -1127,26 +1119,25 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 
 ## Naming Patterns
 
-- kebab-case for service files: `services/groq.ts`, `services/cerebras.ts`
-- camelCase for entrypoint and shared types: `index.ts`, `types.ts`
-- No barrel `index.ts` inside directories — each service file is imported directly
-- camelCase: `getNextService`, `chat`
-- Verb + noun pattern for helpers: `getNextService()`
-- camelCase for local variables and module-level state: `currentServiceIndex`, `chatCompletion`
-- `const` preferred; `let` used only when mutation is required (e.g., `let currentServiceIndex`)
-- Descriptive camelCase: `groqService`, `cerebrasService`
-- Named exports used exclusively (no default exports in services): `export const groqService`
-- PascalCase: `ChatMessage`, `AIService`
-- Defined in a dedicated `types.ts` file at the root
-- Interface keyword used (not `type` alias) for object shapes
+- kebab-case for every module file: `create-chat-completion.ts`, `sdk-error-mapper.ts`, `read-limited-body.ts`
+- Layer directories are top-level and lowercase: `domain/`, `application/`, `adapters/`, `composition/`
+- No barrel `index.ts` inside directories — every module is imported by its real path
+- Factory functions are `create*` / `build*`: `createModelRegistry`, `createProviderStateStore`,
+  `createCerebrasChatProvider`, `buildContainer`
+- Use-case modules export a single factory named after the use case: `createChatCompletion`,
+  `transcribeAudio`, `getReadiness`
+- Route modules export a `match*` / `handle*` pair: `matchModels` / `handleModels`
+- Ports are `*Port` interfaces: `ChatProviderPort`, `TranscriptionPort`; other interfaces are
+  PascalCase nouns: `Container`, `ProviderStateStore`, `Clock`, `Logger`, `UpstreamFailure`
+- `const` preferred; `let` only where mutation is required, and only inside a closure
+- Named exports exclusively — no default exports anywhere
+- `interface` for object shapes; `type` for unions and aliases
 
 ## Code Style
 
 - No formatter config detected (no `.prettierrc`, `biome.json`, or `.editorconfig`)
-- 4-space indentation observed throughout all source files
-- Single quotes for SDK imports in `services/groq.ts` (`'groq-sdk'`), double quotes elsewhere — inconsistent
-- Trailing newlines present in service files
-- No ESLint or Biome config detected
+- 4-space indentation throughout
+- Quote style is not enforced; single quotes dominate in newer modules
 - TypeScript strict mode is the primary enforcement mechanism (see `tsconfig.json`)
 - `strict: true` — all strict checks enabled
 - `noUncheckedIndexedAccess: true` — array/index access returns `T | undefined`
@@ -1158,44 +1149,53 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 
 ## Import Organization
 
-- `import type { ... }` used for type-only imports in `services/cerebras.ts` — consistent with `verbatimModuleSyntax: true`
-- Value imports use plain `import { ... }` in `services/groq.ts` (types imported as values — diverges from verbatimModuleSyntax requirement)
+- `import type { … }` for every type-only import — required by `verbatimModuleSyntax`
+- Value imports first, then type imports, roughly grouped by layer distance
 - Relative paths only; no path aliases configured
+- **Import direction is enforced by `tests/architecture/boundaries.test.ts`** — see
+  `ARCHITECTURE.md` §2 and §6. An import that crosses a layer boundary the wrong way fails `bun test`.
 
 ## Error Handling
 
-- No explicit error handling in any source file — all async operations are un-wrapped (`await` with no try/catch)
-- Errors propagate naturally to `Bun.serve()`'s unhandled rejection path
-- The `refactor.md` spec requires OpenAI-style error responses and upstream status code mapping, but this is not yet implemented
-- `as any` cast used in `services/cerebras.ts` line 11 to bypass type mismatch — suppresses TypeScript errors on the `messages` argument
+- Domain errors are declared in `domain/errors.ts`; use cases return discriminated results
+  (`{ ok: false, kind: … }`) rather than throwing across a layer boundary
+- Vendor SDK errors are flattened to `UpstreamFailure` at the adapter edge by
+  `adapters/outbound/sdk-error-mapper.ts` — the only module that names an SDK error class
+- Presenters own the mapping from a domain result to a wire error shape; no use case builds a `Response`
+- Every route returns a structured error body; the SSE stream always closes with `data: [DONE]`
+- No `as any` casts in production modules; narrowing uses typed `unknown` guards
 
 ## Logging
 
-- Single log per request in `index.ts`: `console.log(`Using service: ${service?.name}`)`
-- Template literals used for interpolation
-- No structured logging, no request IDs, no timestamps
-- `refactor.md` spec requires structured metadata logging (request ID, provider, latency, status code, etc.) — not yet implemented
+- Structured JSON via the `Logger` port (`adapters/outbound/console-logger.ts`), gated by `LOG_LEVEL`
+- Stable event names: `request_complete`, `provider_cooldown`, `provider_failover`, `usage_missing`,
+  `stream_error_before_first_chunk`, `stream_error_after_first_chunk`, `transcription_complete`,
+  `transcription_failed`, `gemini_transcription_complete`, `gemini_transcription_failed`
+- **Never logged:** API keys, `Authorization` headers, prompt or response content, base64 audio,
+  decoded bytes, filenames, transcript text
 
 ## Comments
 
-- Inline comments in Spanish for business context: `// healthcheck para EasyPanel / reverse proxies` (`index.ts` line 26)
-- No JSDoc or TSDoc present anywhere in the codebase
-- Section comments used only where intent might be unclear
+- Comments explain *why*, and cite the requirement or decision ID that motivated the code
+  (`WR-01`, `CR-02`, `NORM-03`, `HEX-05`, `V-04`, `T-08-03-01`)
+- Load-bearing invariants carry a prominent warning comment — see the pre-auth segment in
+  `adapters/inbound/http/router.ts`
+- Some inline comments are in Spanish for business context; both languages appear
 
 ## Function Design
 
-- `chat(messages: ChatMessage[])` — typed array parameter
-- `getNextService()` — no parameters, accesses module-level state
-- `chat()` returns `Promise<AsyncIterable<string>>` per the `AIService` interface
-- Async generator pattern used via IIFE: `(async function* () { ... })()`
-- Note: `services/cerebras.ts` returns the generator function itself (not the invoked result), diverging from the interface contract — this is a bug
-- `currentServiceIndex` in `index.ts` is mutable module-level state managing round-robin routing
-- Services (Groq client, Cerebras client) are instantiated once at module load as module-level singletons
+- Dependencies arrive through an explicit `deps` object, never through module-level imports of
+  concrete implementations
+- Use cases are curried factories: `createChatCompletion(deps)` returns `run(input)`
+- Async generator pattern used via IIFE: `(async function* () { … })()`
+- No module-level mutable state in `domain/`, `application/`, or `adapters/`; the single
+  `Container` instance is memoized in `composition/container.ts`
+- SDK clients are constructed lazily inside their factory closure, never at import time
 
 ## Module Design
 
-- Named exports only: `export const groqService`, `export const cerebrasService`
-- No default exports
+- Named exports only; no default exports
+- No re-export-only modules — the boundary guard rejects them (the Phase 8 shims are gone)
 
 ## Bun-Specific Conventions
 
@@ -1206,7 +1206,6 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 - Use `Bun.file` over `node:fs` readFile/writeFile
 - Bun auto-loads `.env` — do not use `dotenv`
 - Use `bun test` — not Jest or Vitest
-- Use `bun build` — not webpack or esbuild
 
 <!-- GSD:conventions-end -->
 
@@ -1214,101 +1213,131 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 
 ## Architecture
 
+> **The authoritative layering contract is [`ARCHITECTURE.md`](./ARCHITECTURE.md) at the repo root.**
+> It defines the per-layer import allowlists, the allowed/forbidden port primitives, the
+> de-vendoring seam, and the five enforcement rules. This section is a map; that file is the law.
+> Established in Phase 8; the gap report that motivated it is
+> `.planning/phases/08-hexagonal-architecture-audit-refactor/08-ARCHITECTURE-AUDIT.md`.
+
 ## System Overview
 
-```text
+Hexagonal / ports-and-adapters. Dependencies point inward only: adapters know ports, ports never
+know adapters. Layers are top-level directories — there is no `src/`.
 
+```text
+Client
+  |  Authorization: Bearer PERSONAL_PROXY_API_KEY   (or x-goog-api-key / ?key= on the Gemini route)
+  v
+adapters/inbound/http/          delivery: ordered router, middleware, routes, presenters, Zod schemas
+  v
+application/use-cases/          orchestration: eligibility -> attempt -> classify -> cooldown -> failover
+  |                             (returns domain results; never an HTTP Response)
+  v
+domain/                         pure policy: normalization, rate limits, failure classification,
+                                provider state, model registry
+  ^
+application/ports/              5 interfaces the outer layers implement
+  ^
+adapters/outbound/              Cerebras + Groq SDK providers, whisper HTTP/noop, logger, clock,
+                                sdk-error-mapper (the ONLY vendor-aware module)
+  ^
+composition/container.ts        the single wiring point; config.ts is the single env ingress
 ```
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| HTTP Server | Request routing, SSE response relay, health check | `index.ts` |
-| Round-robin router | Stateless service index cycling (`getNextService`) | `index.ts` |
-| Groq service | Wraps groq-sdk, streams completions from Groq Cloud | `services/groq.ts` |
-| Cerebras service | Wraps cerebras SDK, streams completions from Cerebras | `services/cerebras.ts` |
-| Type definitions | Shared `AIService` interface, `ChatMessage` type | `types.ts` |
+| Entrypoint | `import.meta.main` guard; builds the container, starts the server | `index.ts` (23 lines) |
+| Composition root | Builds every adapter and injects it; parses `MODEL_REGISTRY_JSON` | `composition/container.ts` |
+| Config | The only module reading `process.env` for configuration | `config.ts` |
+| HTTP server | `Bun.serve()`, request id, delegates to the router | `adapters/inbound/http/server.ts` |
+| Router | Ordered table: pre-auth segment, Bearer gate, post-auth segment, 404 | `adapters/inbound/http/router.ts` |
+| Routes | One module per endpoint; wire shapes only | `adapters/inbound/http/routes/*.ts` |
+| Presenters | OpenAI error, Gemini error, SSE framing | `adapters/inbound/http/presenters/*.ts` |
+| Middleware | Request id, Bearer auth (constant-time) | `adapters/inbound/http/middleware/*.ts` |
+| Chat orchestration | Provider selection, failover, cooldown, normalization | `application/use-cases/{create,stream}-chat-completion.ts` |
+| Transcription | One use case behind both the OpenAI and Gemini routes | `application/use-cases/transcribe-audio.ts` |
+| Provider state | Injectable store: eligibility, cooldowns, round-robin cursor | `domain/provider-state.ts` |
+| Failure policy | `classifyUpstreamFailure` — failover vs terminal status sets | `domain/failure-classification.ts` |
+| Vendor error mapping | `toUpstreamFailure` — the only `instanceof APIError` site | `adapters/outbound/sdk-error-mapper.ts` |
+| Provider adapters | Cerebras / Groq SDK factories, clients built lazily inside the closure | `adapters/outbound/{cerebras,groq}-chat-provider.ts` |
 
 ## Pattern Overview
 
 - `Bun.serve()` native HTTP server — no Express or external framework
-- Round-robin provider selection via module-level mutable index (`currentServiceIndex`)
-- All provider responses are async generator streams forwarded as SSE (`text/event-stream`)
-- Providers conform to a shared `AIService` interface defined in `types.ts`
-- SDK clients instantiated once at module load time (module-level singletons)
+- Ordered route table; the pre-auth segment (`/health`, `/ready`, Gemini `:generateContent`) is
+  matched **before** the Bearer gate and that ordering is load-bearing
+- Use cases return discriminated results (`{ ok: true, … } | { ok: false, … }`); presenters map
+  them to wire shapes. No use case constructs a `Response`
+- Dependency injection via hand-written factory functions — no DI container library
+- Stateful round-robin with per-provider cooldown, held in one injected store instance
+- SSE framing lives entirely in `presenters/sse.ts`; the streaming use case yields `StreamChunk`
+  objects and never throws, so the sentinel is always emitted
 
 ## Layers
 
-- Purpose: Receive HTTP requests, apply routing logic, return responses
-- Location: `index.ts`
-- Contains: `Bun.serve()` config, route handlers, round-robin selector
-- Depends on: service singletons from `services/`, types from `types.ts`
-- Used by: downstream HTTP clients
-- Purpose: Encapsulate provider SDK calls and normalize output to async generator streams
-- Location: `services/groq.ts`, `services/cerebras.ts`
-- Contains: SDK client instances, `AIService` implementations, async generator adapters
-- Depends on: `groq-sdk`, `@cerebras/cerebras_cloud_sdk`, `types.ts`
-- Used by: `index.ts`
-- Purpose: Define shared data contracts between layers
-- Location: `types.ts`
-- Contains: `ChatMessage` interface, `AIService` interface
-- Depends on: nothing
-- Used by: all other modules
-
-## Data Flow
-
-### Streaming Chat Request Path
-
-### Health Check Path
+- **Domain** (`domain/`) — pure policy. May import only other `domain/` modules. No npm SDK, no
+  `zod`, no `Bun.*`, no `Request`/`Response`/`Headers`, no `process.env`, no `config`.
+- **Application** (`application/use-cases/`, `application/ports/`) — orchestration and the port
+  interfaces. May import `domain/` and `application/ports/`. No adapters, no `config`, no transport types.
+- **Adapters** (`adapters/inbound/**`, `adapters/outbound/**`) — everything that talks to the
+  outside world. May import ports, `domain/`, and their own vendor SDK.
+- **Composition** (`composition/`, `config.ts`, `index.ts`) — may import everything; the only
+  layer allowed to read `process.env` and construct concrete adapters.
 
 ## Key Abstractions
 
-- Purpose: Common contract all provider adapters must satisfy
-- Definition: `types.ts:6-9`
-- Pattern: `{ name: string; chat: (messages: ChatMessage[]) => Promise<AsyncIterable<string>> }`
-- Used by: `index.ts` to invoke providers uniformly
-- Purpose: Typed message shape matching OpenAI's chat format
-- Definition: `types.ts:1-4`
-- Pattern: `{ role: "user" | "assistant" | "system"; content: string }`
-- Purpose: Stateful round-robin across all registered providers
-- Location: `index.ts:5-16`
-- Pattern: Module-level mutable `currentServiceIndex`, wraps with modulo
-- Note: State is process-local and resets on restart; no persistence or cooldown logic
+- `ChatProviderPort` (`application/ports/chat-provider.ts`) — `complete()` / `stream()`; two
+  interchangeable implementations, mocked directly in the integration suite
+- `TranscriptionPort` (`application/ports/transcription.ts`) — `transcribe()` / `health()`
+- `ProviderStateStore` (`application/ports/provider-state-store.ts`) — eligibility, cooldown,
+  cursor, snapshot, reset; created by `createProviderStateStore({ order, clock, configured, resolveUpstreamModel })`
+- `Clock` and `Logger` — injected so domain and application code never read the wall clock or
+  `console` directly
+- `UpstreamFailure` (`domain/types.ts`) — the provider-agnostic failure shape that replaces vendor
+  `APIError` inside routing policy
 
 ## Entry Points
 
-- Location: `index.ts:18`
-- Triggers: `bun index.ts` or `bun run start`
-- Responsibilities: Binds to `process.env.HOSTNAME ?? "0.0.0.0"` and `process.env.PORT ?? 3000`, registers all routes
-- Location: `dist/index.js`
-- Purpose: Compiled output artifact (not used by `bun run start`; likely from a prior build step)
-- Note: Runtime uses `index.ts` directly via Bun's native TypeScript execution
+- `index.ts` — `bun index.ts` or `bun run start`. Builds the container, calls `createServer`, logs
+  the bound URL. Also re-exports `createServer` for tests and embedders.
+- `adapters/inbound/http/server.ts` — `createServer(adapters?, port?, whisperService?, audioMaxFileBytes?, deps?)`.
+  The optional `deps` parameter accepts a `Partial<Container>` so tests inject their own store.
 
 ## Architectural Constraints
 
 - **Threading:** Single-threaded Bun event loop. No worker threads. All concurrency is async/await.
-- **Global state:** Module-level mutable `currentServiceIndex` in `index.ts:10` is shared across all concurrent requests. Concurrent requests may observe non-deterministic provider ordering under load.
+- **Global state:** None in the layer directories. The single `Container` instance is memoized in
+  `composition/container.ts` and shared by every `createServer()` call that does not inject its own.
+- **Import-time side effects:** None. Importing any module under `domain/`, `application/`, or
+  `adapters/` constructs nothing and reads no env — enforced by the boundary guard.
 - **Circular imports:** None detected.
-- **SDK initialization:** `groq` and `cerebras` client instances are module-level singletons. They read API keys from environment at import time (`services/groq.ts:4`, `services/cerebras.ts:5`).
-- **No authentication:** The current implementation has no downstream auth. The `refactor.md` spec requires `Authorization: Bearer PERSONAL_PROXY_API_KEY` — this is not yet implemented.
-- **No cooldown / failover:** Current round-robin is naive (blind index cycling). No rate-limit handling, no provider cooldown, no failover on 429.
+- **SDK initialization:** Both provider clients are created lazily inside their factory closures,
+  never at module load.
 
-## Anti-Patterns
+## Enforcement
 
-### Mutable Module-Level State for Routing
-
-### Type Assertion Bypass on Cerebras Messages
-
-### Non-OpenAI-Compatible Route Structure
+`tests/architecture/boundaries.test.ts` is executable architecture. It fails `bun test` on: a
+forbidden layer import, a vendor/zod/transport construct in an inner layer, a stray `process.env`
+read outside `config.ts`, a top-level import-time construction, or a re-export-only shim module.
+See `ARCHITECTURE.md` §6 for the full rule table.
 
 ## Error Handling
 
-- Unhandled provider errors will propagate as unhandled promise rejections and crash or produce an empty response
-- 404 catch-all returns `new Response("Not found", { status: 404 })` for unknown routes (`index.ts:45`)
-- No OpenAI-style error JSON bodies returned on failure
+- All error paths return a structured body: OpenAI shape `{ error: { message, type, code, param } }`
+  everywhere except the Gemini route, which returns `{ error: { code, message, status } }` with no
+  `type` key
+- Upstream messages pass through `rewriteUpstreamModelIds()` so provider model IDs never leak
+- Streaming errors are logged and the SSE stream is closed with `data: [DONE]` — clients never hang
+- 404 catch-all returns the OpenAI error shape (NORM-10)
 
 ## Cross-Cutting Concerns
+
+- **Request ID:** generated per request, attached to every response as `X-Request-ID`
+- **Auth:** constant-time Bearer comparison with padded buffers; never logged or echoed
+- **Logging:** structured JSON metadata only — never keys, prompts, responses, audio, or transcripts
+- **Size limits:** enforced on actual buffered bytes, never on a declared `Content-Length`
 
 <!-- GSD:architecture-end -->
 

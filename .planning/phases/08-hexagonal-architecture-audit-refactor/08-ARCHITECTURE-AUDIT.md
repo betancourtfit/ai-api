@@ -162,4 +162,35 @@ The suite is the safety net, so what it imports constrains the order of the refa
 
 ---
 
+## 8. Closure
+
+All 15 registered violations are closed. **None left open.**
+
+| ID | Sev | Closed by | How |
+|---|---|---|---|
+| V-01 | critical | 08-03 | Orchestration extracted into `application/use-cases/`; use cases return discriminated domain results and can run without an HTTP server |
+| V-02 | critical | 08-03 | `index.ts` reduced from 1 012 LOC to 22 — entrypoint plus `export { createServer }`; the five fused concerns are now separate modules |
+| V-03 | high | 08-02 | `classifyUpstreamFailure` in `domain/failure-classification.ts` has zero SDK imports; `adapters/outbound/sdk-error-mapper.ts` is the only production file naming a vendor error class |
+| V-04 | high | 08-02 | `CompletionOutcome.headers` is `Record<string, string>`; both provider adapters flatten with `toHeaderRecord()` at their edge. No WHATWG `Headers` type remains in `domain/` |
+| V-05 | high | 08-02 (partial), 08-04 (final) | `createProviderStateStore()` replaced the module globals in 08-02; 08-04 deleted the shim and `resetForTesting()`. Tests now construct a store and inject it via `createServer`'s `deps` parameter |
+| V-06 | high | 08-04 | `composition/container.ts` is the single wiring point. Both SDK clients are built lazily inside their factory closures; the registry parse moved to the container. The guard rejects any top-level import-time construction |
+| V-07 | high | 08-02 | `TranscriptionPort` is interface-only in `application/ports/`; `HttpWhisperService` and `NoopWhisperService` are separate adapter modules |
+| V-08 | medium | 08-03 | One `transcribeAudio` use case backs both `POST /v1/audio/transcriptions` and the Gemini `:generateContent` route; each route maps only its own wire shapes |
+| V-09 | medium | 08-03 | The provider-attempt loop exists once per mode, in `create-chat-completion.ts` and `stream-chat-completion.ts` |
+| V-10 | medium | 08-03 | Request id, Bearer auth, both error presenters, SSE framing, the body reader, and the logger are all named modules |
+| V-11 | medium | 08-03 | `adapters/inbound/http/router.ts` holds an ordered table with an explicit pre-auth segment before `requireBearer` |
+| V-12 | medium | 08-03 | No use case constructs a `Response` — enforced by the boundary guard's use-case rule |
+| V-13 | medium | 08-02 (partial), 08-04 (final) | `config.ts` exposes `loadConfig()` and is the single `process.env` ingress; the guard rejects a stray env read anywhere in `domain/`, `application/`, `adapters/`, or `composition/` (only `routes/health.ts` may read `BUILD_VERSION`) |
+| V-14 | low | 08-03 | The tree matches the documented intent: `domain/`, `application/`, `adapters/`, `composition/`. `CLAUDE.md` §21 and its Architecture section were rewritten in 08-04 to describe what is on disk |
+| V-15 | low | 08-04 | All 11 shims deleted; tests moved to `tests/domain/`, `tests/adapters/`, `tests/unit/` and import the real module paths |
+
+**Phase-level outcome:** 111 tests at phase start → **119 passing, 0 failing** at close (8 added, all in
+`tests/architecture/boundaries.test.ts`). One assertion was deliberately rewritten — the
+`toBe(headers)` reference-identity check in the old `cooldown-manager` suite asserted behaviour of a
+shim that no longer exists, and V-04 makes a flattened header record the contract. Every other
+assertion across the suite is byte-identical to the phase-start version. Zero npm packages added.
+The public wire contract is unchanged.
+
+---
+
 *Gap report for Phase 08. Target contract: `ARCHITECTURE.md` (repo root).*
