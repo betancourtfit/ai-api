@@ -1,0 +1,63 @@
+// adapters/outbound/http-whisper.ts — TranscriptionPort over the whisper.cpp sidecar
+// (POST /inference, GET /health). Adapters may read config (ARCHITECTURE.md §2).
+import type { AudioTranscriptionResult } from '../../domain/types';
+import type { TranscriptionPort } from '../../application/ports/transcription';
+import { config } from '../../config';
+
+// Constructor overrides for tests — production uses config defaults
+export interface HttpWhisperOptions {
+    host?: string;
+    port?: number;
+    inferencePath?: string;
+    timeoutMs?: number;
+    healthTimeoutMs?: number;
+}
+
+export class HttpWhisperService implements TranscriptionPort {
+    private readonly baseUrl: string;
+    private readonly inferencePath: string;
+    private readonly timeoutMs: number;
+    private readonly healthTimeoutMs: number;
+
+    constructor(opts: HttpWhisperOptions = {}) {
+        const host = opts.host ?? config.whisperHost;
+        const port = opts.port ?? config.whisperPort;
+        this.baseUrl = `http://${host}:${port}`;
+        this.inferencePath = opts.inferencePath ?? '/inference';
+        this.timeoutMs = opts.timeoutMs ?? config.whisperTimeoutMs;
+        this.healthTimeoutMs = opts.healthTimeoutMs ?? 2000;
+    }
+
+    async transcribe(file: File, _modelAlias: string): Promise<AudioTranscriptionResult> {
+        const form = new FormData();
+        form.append('file', file, 'audio');
+        form.append('response_format', 'json');
+        // whisper-server defaults language to "en" — force-decoding non-English audio
+        // produces canonical hallucinations ("the quick brown fox…"). "auto" detects.
+        form.append('language', config.whisperLanguage);
+
+        const res = await fetch(`${this.baseUrl}${this.inferencePath}`, {
+            method: 'POST',
+            body: form,
+            signal: AbortSignal.timeout(this.timeoutMs),
+        });
+
+        if (!res.ok) {
+            throw new Error(`whisper-server responded ${res.status}`);
+        }
+
+        const body = await res.json() as { text?: string };
+        return { text: body.text ?? '' };
+    }
+
+    async health(): Promise<boolean> {
+        try {
+            const res = await fetch(`${this.baseUrl}/health`, {
+                signal: AbortSignal.timeout(this.healthTimeoutMs),
+            });
+            return res.ok;
+        } catch {
+            return false;
+        }
+    }
+}
