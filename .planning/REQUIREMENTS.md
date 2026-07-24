@@ -154,9 +154,9 @@ Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no 
 
 ### Application
 
-- [ ] **HEX-09**: Chat-completion orchestration (eligibility → attempt → classify → cooldown → failover → normalize) is a transport-free use case returning a domain result, never an HTTP `Response`
-- [ ] **HEX-10**: Audio transcription orchestration is shared by the OpenAI route and the Gemini route; each route maps only its own wire shapes
-- [ ] **HEX-11**: HTTP delivery is an ordered route table plus middleware and presenters; route handlers contain no provider-selection or failover logic
+- [x] **HEX-09**: Chat-completion orchestration (eligibility → attempt → classify → cooldown → failover → normalize) is a transport-free use case returning a domain result, never an HTTP `Response`
+- [x] **HEX-10**: Audio transcription orchestration is shared by the OpenAI route and the Gemini route; each route maps only its own wire shapes
+- [x] **HEX-11**: HTTP delivery is an ordered route table plus middleware and presenters; route handlers contain no provider-selection or failover logic
 
 ### Composition & State
 
