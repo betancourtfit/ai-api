@@ -2,8 +2,8 @@
 // Tests: model rewrite, object literals, provider-field stripping by construction,
 //        usage synthesis, system_fingerprint conditional, delta rebuild (NORM-01..09)
 import { describe, expect, test } from 'bun:test';
-import { normalizeResponse, normalizeChunk } from '../../response-normalizer';
-import type { ChatCompletionResult, StreamChunk } from '../../types';
+import { normalizeResponse, normalizeChunk } from '../../domain/normalization';
+import type { ChatCompletionResult, StreamChunk } from '../../domain/types';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures

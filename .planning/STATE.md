@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: completed
-last_updated: "2026-06-17T04:10:00.000Z"
-last_activity: 2026-06-17
+status: complete
+last_updated: "2026-07-24T03:25:00.000Z"
+last_activity: 2026-07-24 -- Phase 08 verified, secured, and marked complete
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 16
-  completed_plans: 16
+  total_phases: 8
+  completed_phases: 8
+  total_plans: 20
+  completed_plans: 20
   percent: 100
 ---
 
@@ -23,12 +23,12 @@ progress:
 
 ## Current Position
 
-Phase: 7 (Gemini-Compatible Transcription Shim)
-Plan: All complete
-Status: Milestone v2.0 shipped — PR #1 (phases 5–7 + whisper sidecar) → master
-Last activity: 2026-06-17 - Shipped milestone v2.0 — PR #1
+Phase: 08 (hexagonal-architecture-audit-refactor) — COMPLETE
+Plan: 4 of 4
+Status: Verified (15/15 requirements, 119/119 tests, UAT 3/3 live) and secured (24/24 threats closed). Milestone v2.0 has no phases remaining.
+Last activity: 2026-07-24 -- Phase 08 verified, secured, and marked complete
 
-Progress bar: ██████████ 100% (7/7 phases)
+Progress bar: ██████████ 100% (8/8 phases)
 
 ## Performance Metrics
 
@@ -38,6 +38,11 @@ Progress bar: ██████████ 100% (7/7 phases)
 - Phases complete: 3/3 (v1.0) + 3/3 (v2.0)
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 8 added (2026-07-23): Hexagonal Architecture Audit + Refactor — architect audit of Clean/Hexagonal compliance, gap diagnosis, and refactor to target guidelines
+- Phase 8 planned (2026-07-23): 4 sequential plans; requirements HEX-01..15 derived and added to REQUIREMENTS.md as milestone v3.1
 
 ### Key Decisions
 
@@ -56,6 +61,7 @@ Progress bar: ██████████ 100% (7/7 phases)
 - **v2.0:** Phase 5 gates: 100% TEST2-xx coverage against mocked WhisperService before touching real binary
 - **v2.0:** maxRequestBodySize raised to audio limit in Bun.serve(); chat-completion 1 MiB limit enforced at validation layer
 - **Phase 6:** HttpWhisperService activates only when WHISPER_MODEL_ALIAS is set; lives in whisper-service.ts; inline entrypoint wiring; boot never blocked by sidecar health
+- **Phase 8 (planned):** Layers are top-level directories (`domain/ application/ adapters/ composition/`) — honours the no-`src/` preference; ports may use `AbortSignal`/`File`/`Uint8Array`/`AsyncIterable` but never `Headers`/`Request`/`Response`/vendor SDK types; SDK `APIError` knowledge confined to `adapters/outbound/sdk-error-mapper.ts`; refactor proceeds shim-first (old paths keep re-exporting until plan 04) so the 111-test suite is the regression harness with zero assertion edits
 - **Phase 7:** Gemini-compat `POST /v1beta/models/{model}:generateContent` route placed BEFORE the global Bearer gate (uses `?key=`/`x-goog-api-key`, not Bearer); reuses injected WhisperService; per-route `geminiError()` factory keeps wire shapes isolated; URL `{model}` not required to equal WHISPER_MODEL_ALIAS (preserves n8n URL-swap migration); zero new npm packages (native Buffer+File base64 decode)
 
 ### Todos
@@ -71,12 +77,24 @@ None
 | # | Description | Date | Commit | Status | Directory |
 |---|-------------|------|--------|--------|-----------|
 | 260617-g3v | Embed whisper-server sidecar in Docker container (single image, two processes) for EasyPanel deploy | 2026-06-17 | 43008ea | Verified | [260617-g3v-embed-whisper-server-sidecar-in-docker-c](./quick/260617-g3v-embed-whisper-server-sidecar-in-docker-c/) |
+| Phase 08 P01 | 9 min | 4 tasks | 2 files |
+| Phase 08 P02 | 24 min | 6 tasks | 18 files |
+| Phase 08 P03 | 22 min | 5 tasks | 27 files |
+| Phase 08 P04 | 26 min | 6 tasks | 24 files |
 
 ## Session Continuity
 
-**Last action:** Phase 7 complete — discuss → plan → execute → code review (1 HIGH + findings fixed) → verification passed (4/4). Full suite 104/104 green; zero new deps.
-**Next action:** None pending. Phase 7 done. (Optional: live n8n-node smoke test against a running whisper sidecar — confirmation only, not a gate.)
+**Last action:** Phase 8 closed out. Executed (4 plans, 24 commits, `index.ts` 1,012 → 22 LOC, layers at `domain/ application/ adapters/ composition/`, 48 modules, 8 executable boundary guards, zero new deps, 111 → 119 tests). Verified 15/15 requirements. UAT 3/3 walked against **live** Cerebras and Groq — non-streaming, streaming SSE with a single `[DONE]`, and A-B-A-B round-robin alternation with no key material in `/internal/providers/status`. Security audit SECURED: 24/24 threats closed, `threats_open: 0`.
+**Next action:** Milestone v2.0 has no phases remaining — `/gsd-complete-milestone` to archive, or `/gsd-new-milestone` to open the next one.
 **Resume file:** None
+
+### Carried-forward debt (from Phase 8)
+
+- Upstream abort on client disconnect is unverified — UAT confirmed the server survives a mid-stream disconnect, not that the provider request is actually cancelled. Wastes quota if broken; no data exposure.
+- The 429 cooldown / failover path never ran against a real provider; covered by mock-based tests only.
+- `bunx tsc --noEmit` reports 7 pre-existing errors and no typecheck gate is wired into CI.
+- `dist/index.js` is a stale pre-Phase-1 build artifact still in the tree.
+- The new use cases are headlessly testable but have no direct unit tests yet.
 
 ---
 

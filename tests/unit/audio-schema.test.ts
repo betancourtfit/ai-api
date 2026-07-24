@@ -2,7 +2,7 @@
 // Covers AUDIO-01..06, validates schema allowlist and size-check path (AUDIO-03).
 // No server, no FormData, no whisper binary required.
 import { test, expect, describe } from "bun:test";
-import { validateAudioTranscription, validateAudioFileSize } from "../../audio-schema";
+import { validateAudioTranscription, validateAudioFileSize } from "../../adapters/inbound/http/schemas/audio-schema";
 
 describe("validateAudioTranscription", () => {
     test("valid input returns success:true with data.model", () => {
