@@ -58,6 +58,22 @@ export interface AudioTranscriptionResult {
     text: string;
 }
 
+// Per-provider routing state. Declared here (not in application/ports) because domain modules
+// may not import from application/; the port file re-exports this same type.
+export interface ProviderState {
+    provider: ProviderId;
+    enabled: boolean;
+    configured: boolean;
+    healthy: boolean;
+    cooldownUntil: number | null;
+    lastSelectedAt: number | null;
+    lastSuccessAt: number | null;
+    lastFailureAt: number | null;
+    lastStatusCode: number | null;
+    consecutiveFailures: number;
+    rateLimitSnapshot?: Record<string, string>;
+}
+
 // Provider-agnostic view of a failed upstream call. Produced at the adapter edge by
 // adapters/outbound/sdk-error-mapper.ts so routing policy never sees a vendor error class.
 export interface UpstreamFailure {

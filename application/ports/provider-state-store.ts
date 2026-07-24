@@ -1,20 +1,9 @@
 // application/ports/provider-state-store.ts — port for provider routing state (HEX-07, HEX-08)
-// Interface only. ProviderState moved verbatim from routing/provider-state.ts:7-19.
-import type { ProviderId } from '../../domain/types';
+// Interface only. ProviderState is declared in domain/types.ts (domain may not import from
+// application/, so the shape lives inward and is re-exported here for port consumers).
+import type { ProviderId, ProviderState } from '../../domain/types';
 
-export interface ProviderState {
-    provider: ProviderId;
-    enabled: boolean;
-    configured: boolean;
-    healthy: boolean;
-    cooldownUntil: number | null;
-    lastSelectedAt: number | null;
-    lastSuccessAt: number | null;
-    lastFailureAt: number | null;
-    lastStatusCode: number | null;
-    consecutiveFailures: number;
-    rateLimitSnapshot?: Record<string, string>;
-}
+export type { ProviderState };
 
 export interface ProviderStateStore {
     isEligible(provider: ProviderId, logicalModel: string): boolean;
