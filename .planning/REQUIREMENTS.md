@@ -137,9 +137,9 @@ Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no 
 
 ### Audit & Contract
 
-- [ ] **HEX-01**: A written architecture audit maps every production source file to a hexagonal layer (domain / application+ports / adapters / composition root)
-- [ ] **HEX-02**: Every boundary violation is recorded with a severity, the rule it breaks, and `file:line` evidence
-- [ ] **HEX-03**: A durable target-architecture document states the allowed import direction per layer, including the explicitly allowed and forbidden runtime primitives in port signatures
+- [x] **HEX-01**: A written architecture audit maps every production source file to a hexagonal layer (domain / application+ports / adapters / composition root)
+- [x] **HEX-02**: Every boundary violation is recorded with a severity, the rule it breaks, and `file:line` evidence
+- [x] **HEX-03**: A durable target-architecture document states the allowed import direction per layer, including the explicitly allowed and forbidden runtime primitives in port signatures
 
 ### Domain Purity
 

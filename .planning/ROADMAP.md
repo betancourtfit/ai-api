@@ -180,7 +180,7 @@ Plans:
 
 **Requirements:** HEX-01, HEX-02, HEX-03, HEX-04, HEX-05, HEX-06, HEX-07, HEX-08, HEX-09, HEX-10, HEX-11, HEX-12, HEX-13, HEX-14, HEX-15
 **Depends on:** Phase 7
-**Plans:** 4 plans
+**Plans:** 0/4 plans executed
 
 Scope:
 
@@ -237,7 +237,7 @@ Cross-cutting constraints:
 | 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
 | 7. Gemini-Compatible Transcription Shim | 1/1 | Complete   | 2026-06-17 |
 
-| 8. Hexagonal Architecture Audit + Refactor | 0/4 | Ready to execute | — |
+| 8. Hexagonal Architecture Audit + Refactor | 0/4 | Planned    |  |
 
 ---
 
