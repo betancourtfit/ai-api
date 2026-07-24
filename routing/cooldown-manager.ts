@@ -1,6 +1,18 @@
-// routing/cooldown-manager.ts — rate-limit header parsers, cooldown calc, error classification (RL-01..04, ROUTE-05/06)
-import { APIError as CerebrasAPIError } from "@cerebras/cerebras_cloud_sdk";
-import { APIError as GroqAPIError } from "groq-sdk";
+// Phase 8 compatibility shim — removed in plan 08-04.
+// Domain: domain/rate-limits.ts + domain/failure-classification.ts
+// Adapter: adapters/outbound/sdk-error-mapper.ts (the only vendor-aware module)
+//
+// This shim keeps every legacy export name and signature so index.ts and
+// tests/routing/cooldown-manager.test.ts continue to work unchanged, including the
+// tolerance for Headers / plain-record / { get() } inputs.
+import {
+    calcCooldownMs as calcCooldownMsDomain,
+    parseCerebrasHeaders as parseCerebrasHeadersDomain,
+    parseGroqHeaders as parseGroqHeadersDomain,
+} from "../domain/rate-limits";
+import { classifyUpstreamFailure } from "../domain/failure-classification";
+import { rawSdkErrorHeaders, toHeaderRecord, toUpstreamFailure } from "../adapters/outbound/sdk-error-mapper";
+import type { ParsedCerebrasHeaders, ParsedGroqHeaders } from "../domain/rate-limits";
 
 type HeaderSource =
     | Headers
@@ -8,54 +20,16 @@ type HeaderSource =
     | { get(name: string): string | null | undefined };
 
 export type { HeaderSource };
+export type { ParsedCerebrasHeaders, ParsedGroqHeaders };
 
-export interface ParsedCerebrasHeaders {
-    remainingRequestsDay?: number;
-    remainingTokensMinute?: number;
-    resetRequestsDaySeconds?: number;
-    resetTokensMinuteSeconds?: number;
-}
-
-export interface ParsedGroqHeaders {
-    remainingRequests?: number;
-    remainingTokens?: number;
-    resetRequestsSeconds?: number;
-    resetTokensSeconds?: number;
-    retryAfterSeconds?: number;
-}
+export const calcCooldownMs = calcCooldownMsDomain;
 
 export function parseCerebrasHeaders(headers: HeaderSource): ParsedCerebrasHeaders {
-    return {
-        remainingRequestsDay: toFloat(readHeader(headers, "x-ratelimit-remaining-requests-day")),
-        remainingTokensMinute: toFloat(readHeader(headers, "x-ratelimit-remaining-tokens-minute")),
-        resetRequestsDaySeconds: toFloat(readHeader(headers, "x-ratelimit-reset-requests-day")),
-        resetTokensMinuteSeconds: toFloat(readHeader(headers, "x-ratelimit-reset-tokens-minute")),
-    };
+    return parseCerebrasHeadersDomain(toHeaderRecord(headers) ?? {});
 }
 
 export function parseGroqHeaders(headers: HeaderSource): ParsedGroqHeaders {
-    return {
-        remainingRequests: toNum(readHeader(headers, "x-ratelimit-remaining-requests")),
-        remainingTokens: toNum(readHeader(headers, "x-ratelimit-remaining-tokens")),
-        resetRequestsSeconds: parseDuration(readHeader(headers, "x-ratelimit-reset-requests")),
-        resetTokensSeconds: parseDuration(readHeader(headers, "x-ratelimit-reset-tokens")),
-        retryAfterSeconds: toFloat(readHeader(headers, "retry-after")),
-    };
-}
-
-export function calcCooldownMs(
-    parsed: Partial<ParsedCerebrasHeaders & ParsedGroqHeaders>,
-    defaultCooldownSeconds: number
-): number {
-    const seconds = Math.max(
-        defaultCooldownSeconds,
-        parsed.retryAfterSeconds ?? 0,
-        parsed.resetTokensMinuteSeconds ?? 0,
-        parsed.resetTokensSeconds ?? 0,
-        parsed.resetRequestsDaySeconds ?? 0,   // CR-02: was parsed but omitted — daily-quota 429s need full reset window
-    );
-
-    return Math.round(seconds * 1000);
+    return parseGroqHeadersDomain(toHeaderRecord(headers) ?? {});
 }
 
 export function classifyError(err: unknown): {
@@ -64,76 +38,19 @@ export function classifyError(err: unknown): {
     headers: HeaderSource | undefined;
     message: string | undefined;
 } {
-    const failoverStatuses = new Set([408, 429, 498, 500, 502, 503, 504]);
-    const noFailoverStatuses = new Set([400, 401, 403, 404, 413, 422]);
+    const classified = classifyUpstreamFailure(toUpstreamFailure(err));
 
-    if (err instanceof GroqAPIError || err instanceof CerebrasAPIError) {
-        if (noFailoverStatuses.has(err.status ?? -1)) {
-            return { shouldFailover: false, status: err.status, headers: err.headers, message: err.message };
-        }
-
-        if (failoverStatuses.has(err.status ?? -1)) {
-            return { shouldFailover: true, status: err.status, headers: err.headers, message: err.message };
-        }
-
-        return { shouldFailover: true, status: err.status, headers: err.headers, message: err.message };
-    }
+    // Legacy contract: hand back the SDK error's own header object by reference.
+    // Callers pass it straight into parseCerebrasHeaders/parseGroqHeaders above, which
+    // re-flatten it. Plan 08-04 removes this shim and the raw-header passthrough with it.
+    const rawHeaders = rawSdkErrorHeaders(err);
 
     return {
-        shouldFailover: true,
-        status: undefined,
-        headers: undefined,
-        message: undefined,
+        shouldFailover: classified.shouldFailover,
+        status: classified.status,
+        headers: rawHeaders === undefined || rawHeaders === null
+            ? undefined
+            : rawHeaders as HeaderSource,
+        message: classified.message,
     };
-}
-
-function toFloat(value: string | null): number | undefined {
-    if (!value) return undefined;
-    const parsed = Number.parseFloat(value);
-    return Number.isNaN(parsed) ? undefined : parsed;
-}
-
-function toNum(value: string | null): number | undefined {
-    if (!value) return undefined;
-    const parsed = Number(value);
-    return Number.isNaN(parsed) ? undefined : parsed;
-}
-
-function readHeader(headers: HeaderSource, name: string): string | null {
-    if ("get" in headers && typeof headers.get === "function") {
-        return headers.get(name) ?? null;
-    }
-
-    const recordHeaders = headers as Record<string, string | string[] | null | undefined>;
-    const direct = recordHeaders[name];
-    if (Array.isArray(direct)) {
-        return direct[0] ?? null;
-    }
-    if (typeof direct === "string") {
-        return direct;
-    }
-
-    const normalizedName = name.toLowerCase();
-    for (const [key, value] of Object.entries(recordHeaders)) {
-        if (key.toLowerCase() !== normalizedName) continue;
-        if (Array.isArray(value)) {
-            return value[0] ?? null;
-        }
-        return typeof value === "string" ? value : null;
-    }
-
-    return null;
-}
-
-function parseDuration(value: string | null): number | undefined {
-    if (value === null || value === '') return undefined; // WR-04: explicit guard — !value would miss '' after a refactor to string|undefined
-
-    const match = value.match(/^(?:(\d+)m)?(?:([0-9.]+)s)?$/);
-    if (!match) return undefined;
-
-    const minutes = match[1] ? Number(match[1]) : 0;
-    const seconds = match[2] ? Number.parseFloat(match[2]) : 0;
-
-    if (Number.isNaN(minutes) || Number.isNaN(seconds)) return undefined;
-    return (minutes * 60) + seconds;
 }

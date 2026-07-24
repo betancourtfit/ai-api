@@ -32,7 +32,7 @@ function makeDefaultComplete(name: 'cerebras' | 'groq'): () => Promise<Completio
             }],
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         },
-        headers: new Headers(),
+        headers: {},
     });
 }
 

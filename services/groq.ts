@@ -4,6 +4,7 @@
 import Groq from 'groq-sdk';
 import type { ChatCompletionChunk } from 'groq-sdk/resources/chat/completions';
 import { config } from '../config';
+import { toHeaderRecord } from '../adapters/outbound/sdk-error-mapper';
 import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
 let groq: Groq | null = null;
@@ -58,7 +59,7 @@ export const groqAdapter: ProviderAdapter = {
             system_fingerprint: data.system_fingerprint ?? undefined,
         };
 
-        return { result, headers: response.headers };
+        return { result, headers: toHeaderRecord(response.headers) ?? {} };
     },
     async stream(
         upstreamModelId: string,

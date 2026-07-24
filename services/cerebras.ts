@@ -3,6 +3,7 @@
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming, ChatCompletionCreateParamsStreaming } from '@cerebras/cerebras_cloud_sdk/resources/chat';
 import { config } from '../config';
+import { toHeaderRecord } from '../adapters/outbound/sdk-error-mapper';
 import type { ProviderAdapter, ChatCompletionResult, CompletionOutcome, CompletionParams, StreamChunk } from '../types';
 
 let cerebras: Cerebras | null = null;
@@ -64,7 +65,7 @@ export const cerebrasAdapter: ProviderAdapter = {
             system_fingerprint: completion.system_fingerprint ?? undefined,
         };
 
-        return { result, headers: response.headers };
+        return { result, headers: toHeaderRecord(response.headers) ?? {} };
     },
     async stream(
         upstreamModelId: string,

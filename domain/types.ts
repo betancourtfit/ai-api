@@ -1,6 +1,5 @@
 // domain/types.ts — pure DTO contracts for the proxy (Phase 8, HEX-04)
-// No imports. No vendor SDK types, no HTTP transport types beyond the CompletionOutcome
-// header carrier, which Task 4 of plan 08-02 flattens to Record<string, string>.
+// No imports. No vendor SDK types, no HTTP transport types.
 // ProviderAdapter is NOT here — it is a port and lives in application/ports/chat-provider.ts.
 
 export type ProviderId = "cerebras" | "groq";
@@ -32,9 +31,11 @@ export interface ChatCompletionResult {
     system_fingerprint?: string;
 }
 
+// V-04 closed: headers cross the port as a flattened, lowercase-keyed record, never as a
+// WHATWG Headers. Adapters flatten with toHeaderRecord() at their edge.
 export interface CompletionOutcome {
     result: ChatCompletionResult;
-    headers: Headers;
+    headers: Record<string, string>;
 }
 
 export interface StreamChunk {
