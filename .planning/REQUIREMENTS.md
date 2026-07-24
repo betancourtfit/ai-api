@@ -131,6 +131,45 @@
 
 ---
 
+## Milestone v3.1 — Hexagonal Architecture (Phase 8)
+
+Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no feature, no wire-contract change, no new dependency.
+
+### Audit & Contract
+
+- [ ] **HEX-01**: A written architecture audit maps every production source file to a hexagonal layer (domain / application+ports / adapters / composition root)
+- [ ] **HEX-02**: Every boundary violation is recorded with a severity, the rule it breaks, and `file:line` evidence
+- [ ] **HEX-03**: A durable target-architecture document states the allowed import direction per layer, including the explicitly allowed and forbidden runtime primitives in port signatures
+
+### Domain Purity
+
+- [ ] **HEX-04**: `domain/` imports nothing outside `domain/` — no npm SDK, no `zod`, no `Bun.*`, no `Request`/`Response`/`Headers`, no `process.env`, no `config`
+- [ ] **HEX-05**: Upstream failure classification operates on a provider-agnostic failure shape, not vendor `APIError` classes
+- [ ] **HEX-06**: Rate-limit header parsing consumes a plain `Record<string, string>` map, not a WHATWG `Headers` instance
+
+### Ports
+
+- [ ] **HEX-07**: Every outbound dependency (chat provider, transcription, provider-state store, clock, logger) is declared as an interface owned by the application layer, in a file separate from any implementation
+- [ ] **HEX-08**: No port signature references a vendor SDK type or an HTTP transport type
+
+### Application
+
+- [ ] **HEX-09**: Chat-completion orchestration (eligibility → attempt → classify → cooldown → failover → normalize) is a transport-free use case returning a domain result, never an HTTP `Response`
+- [ ] **HEX-10**: Audio transcription orchestration is shared by the OpenAI route and the Gemini route; each route maps only its own wire shapes
+- [ ] **HEX-11**: HTTP delivery is an ordered route table plus middleware and presenters; route handlers contain no provider-selection or failover logic
+
+### Composition & State
+
+- [ ] **HEX-12**: Provider state is an injected store instance — no module-level mutable singleton and no test-only reset function exported from production code
+- [ ] **HEX-13**: A single composition root builds and injects every adapter; importing any domain, application, or adapter module performs no env read, no JSON parse, and constructs no SDK client
+
+### Regression & Enforcement
+
+- [ ] **HEX-14**: The full `bun test` suite is green (≥ 111 tests, 0 fail) after every plan; public wire contract unchanged — same paths, methods, status codes, headers, JSON shapes, SSE framing; zero new npm packages
+- [ ] **HEX-15**: An automated boundary-guard test fails when a forbidden cross-layer import is introduced
+
+---
+
 ## v1.0 Validated Requirements
 
 All 76 v1.0 requirements validated:

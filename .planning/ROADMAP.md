@@ -17,6 +17,7 @@
 - [x] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage (completed 2026-06-06)
 - [x] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field (completed 2026-06-06)
 - [x] **Phase 7: Gemini-Compatible Transcription Shim** - New `POST /v1beta/models/{model}:generateContent` route, wire-compatible with Google Gemini for audio transcription, so n8n nodes migrate by changing only URL + API key (TDD: spec test pre-committed) (completed 2026-06-17)
+- [ ] **Phase 8: Hexagonal Architecture Audit + Refactor** - Architect audit of Clean/Hexagonal compliance with clear boundaries, gap diagnosis, and refactor to the target architecture with no behavior change
 
 ---
 
@@ -173,6 +174,55 @@ Plans:
 
 **Plans:** 1/1 plans complete
 
+### Phase 8: Hexagonal Architecture Audit + Refactor
+
+**Goal:** The codebase is audited against Clean/Hexagonal Architecture with explicit boundaries (domain core, ports, adapters, composition root), the gaps are documented with evidence per file, and the code is refactored to satisfy the target guidelines — with all 104 existing tests still green and zero behavior change on the public wire contract.
+
+**Requirements:** HEX-01, HEX-02, HEX-03, HEX-04, HEX-05, HEX-06, HEX-07, HEX-08, HEX-09, HEX-10, HEX-11, HEX-12, HEX-13, HEX-14, HEX-15
+**Depends on:** Phase 7
+**Plans:** 4 plans
+
+Scope:
+
+1. **Audit** — software-architect review of current structure (`index.ts`, `routes/`, `services/`, `providers/`, `middleware/`, `schemas/`) against hexagonal rules: dependency direction inward, domain free of SDK/HTTP/Bun types, ports as interfaces, adapters at the edges, single composition root, no leaked provider types across layers.
+2. **Gap report** — per-violation findings with severity, file/line evidence, and the boundary each one crosses.
+3. **Refactor plan** — target module layout + ordered, atomic migration steps sized so tests stay green after each one.
+4. **Execution** — apply the refactor; public HTTP contract and test suite unchanged.
+
+Non-goals: no new features, no new npm deps, no wire-contract changes.
+
+**Success Criteria** (what must be TRUE):
+
+  1. `08-ARCHITECTURE-AUDIT.md` classifies every production `.ts` file into one hexagonal layer and registers every violation with severity + `file:line` evidence; `ARCHITECTURE.md` states the per-layer import rules.
+  2. `domain/` and `application/` import no vendor SDK, no `zod`, no `config`, no `process.env`, and no HTTP transport type — enforced by `tests/architecture/boundaries.test.ts`, which fails on a deliberate violation.
+  3. Chat-completion orchestration and audio transcription are transport-free use cases; HTTP delivery is an ordered route table with middleware and presenters; `index.ts` is under 40 lines.
+  4. One composition root builds and injects every adapter; no module-level mutable provider state and no production `resetForTesting()` remain.
+  5. `bun test` is green at ≥ 111 passes with zero assertion edits, the public wire contract is unchanged, and zero npm packages were added.
+
+Plans:
+
+**Wave 1**
+
+- [ ] 08-01-PLAN.md — Architecture audit + gap report (V-01..V-15) + durable `ARCHITECTURE.md` target contract (HEX-01..03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 08-02-PLAN.md — Pure `domain/` + five `application/ports/`, de-vendored failure classification, injectable provider-state store, boundary guard (HEX-04..08, 15)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 08-03-PLAN.md — Application use cases + thin HTTP delivery (ordered router, middleware, presenters); `index.ts` god file dissolved (HEX-09..11)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 08-04-PLAN.md — Composition root, injectable SDK provider factories, shim removal + test rewiring, docs update (HEX-12..13)
+
+Cross-cutting constraints:
+
+- `bun test` green after every task; zero assertion edits; public wire contract frozen (HEX-14)
+- `tests/architecture/boundaries.test.ts` extended by each plan and must fail on a deliberate violation (HEX-15)
+- Zero new npm packages; no `src/` — layers are top-level directories
+
 ---
 
 ## Progress
@@ -186,6 +236,8 @@ Plans:
 | 5. Transcription Route + Auth + Tests | 2/2 | Complete    | 2026-06-06 |
 | 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
 | 7. Gemini-Compatible Transcription Shim | 1/1 | Complete   | 2026-06-17 |
+
+| 8. Hexagonal Architecture Audit + Refactor | 0/4 | Ready to execute | — |
 
 ---
 

@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: completed
-last_updated: "2026-06-17T04:10:00.000Z"
-last_activity: 2026-06-17
+status: "Ready to execute — Phase 8 planned (4 plans, 4 waves)"
+last_updated: "2026-07-24T01:29:15.810Z"
+last_activity: "2026-07-23 - Phase 8 planned (Hexagonal Architecture Audit + Refactor)"
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 7
-  total_plans: 16
+  total_plans: 20
   completed_plans: 16
-  percent: 100
+  percent: 88
 ---
 
 # State: bun-ai-api OpenAI-Compatible Proxy Refactor
@@ -23,12 +23,12 @@ progress:
 
 ## Current Position
 
-Phase: 7 (Gemini-Compatible Transcription Shim)
-Plan: All complete
-Status: Milestone v2.0 shipped — PR #1 (phases 5–7 + whisper sidecar) → master
-Last activity: 2026-06-17 - Shipped milestone v2.0 — PR #1
+Phase: 8 (Hexagonal Architecture Audit + Refactor)
+Plan: 0/4 complete
+Status: Ready to execute — 4 plans across 4 sequential waves
+Last activity: 2026-07-23 - Phase 8 planned (research + 4 plans, HEX-01..15 derived)
 
-Progress bar: ██████████ 100% (7/7 phases)
+Progress bar: █████████░ 88% (7/8 phases)
 
 ## Performance Metrics
 
@@ -38,6 +38,11 @@ Progress bar: ██████████ 100% (7/7 phases)
 - Phases complete: 3/3 (v1.0) + 3/3 (v2.0)
 
 ## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 8 added (2026-07-23): Hexagonal Architecture Audit + Refactor — architect audit of Clean/Hexagonal compliance, gap diagnosis, and refactor to target guidelines
+- Phase 8 planned (2026-07-23): 4 sequential plans; requirements HEX-01..15 derived and added to REQUIREMENTS.md as milestone v3.1
 
 ### Key Decisions
 
@@ -56,6 +61,7 @@ Progress bar: ██████████ 100% (7/7 phases)
 - **v2.0:** Phase 5 gates: 100% TEST2-xx coverage against mocked WhisperService before touching real binary
 - **v2.0:** maxRequestBodySize raised to audio limit in Bun.serve(); chat-completion 1 MiB limit enforced at validation layer
 - **Phase 6:** HttpWhisperService activates only when WHISPER_MODEL_ALIAS is set; lives in whisper-service.ts; inline entrypoint wiring; boot never blocked by sidecar health
+- **Phase 8 (planned):** Layers are top-level directories (`domain/ application/ adapters/ composition/`) — honours the no-`src/` preference; ports may use `AbortSignal`/`File`/`Uint8Array`/`AsyncIterable` but never `Headers`/`Request`/`Response`/vendor SDK types; SDK `APIError` knowledge confined to `adapters/outbound/sdk-error-mapper.ts`; refactor proceeds shim-first (old paths keep re-exporting until plan 04) so the 111-test suite is the regression harness with zero assertion edits
 - **Phase 7:** Gemini-compat `POST /v1beta/models/{model}:generateContent` route placed BEFORE the global Bearer gate (uses `?key=`/`x-goog-api-key`, not Bearer); reuses injected WhisperService; per-route `geminiError()` factory keeps wire shapes isolated; URL `{model}` not required to equal WHISPER_MODEL_ALIAS (preserves n8n URL-swap migration); zero new npm packages (native Buffer+File base64 decode)
 
 ### Todos
@@ -74,8 +80,8 @@ None
 
 ## Session Continuity
 
-**Last action:** Phase 7 complete — discuss → plan → execute → code review (1 HIGH + findings fixed) → verification passed (4/4). Full suite 104/104 green; zero new deps.
-**Next action:** None pending. Phase 7 done. (Optional: live n8n-node smoke test against a running whisper sidecar — confirmation only, not a gate.)
+**Last action:** Phase 8 planned — architecture research + audit written to `08-RESEARCH.md` (15 violations V-01..V-15, 2 critical / 5 high / 6 medium / 2 low), 15 HEX requirements derived into REQUIREMENTS.md, 4 sequential plans created. Measured baseline: `bun test` 111 pass / 0 fail (ROADMAP's "104 tests" was stale). No CONTEXT.md — planned from ROADMAP scope + research.
+**Next action:** Execute Phase 8 — `/gsd-execute-phase 8`.
 **Resume file:** None
 
 ---
