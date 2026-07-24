@@ -1,7 +1,11 @@
 // index.ts — Bun.serve() router with auth + validation + alias resolve + completion
 // Phase 3: createServer factory (D-02), X-Request-ID (OBS-01), structured logs (OBS-02..04), NORM-10, D-07
-import { timingSafeEqual } from 'node:crypto';
 import { config } from './config';
+import { openaiError, authNotConfiguredError } from './adapters/inbound/http/presenters/openai-error';
+import { geminiError } from './adapters/inbound/http/presenters/gemini-error';
+import { newRequestId, withRequestId as attachRequestId } from './adapters/inbound/http/middleware/request-id';
+import { extractBearerToken, verifyToken } from './adapters/inbound/http/middleware/bearer-auth';
+import { createConsoleLogger } from './adapters/outbound/console-logger';
 import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
 import { validateAudioFileSize, validateAudioTranscription } from './audio-schema';
 import { validateChatCompletion } from './request-schema';
@@ -16,75 +20,11 @@ import type { WhisperService } from './whisper-service';
 import type { AudioTranscriptionResult, CompletionParams, ProviderAdapter, StreamChunk } from './types';
 import type { HeaderSource } from './routing/cooldown-manager';
 
-// OBS-02: log level numeric map — error:0, warn:1, info:2
-const LOG_LEVEL_MAP: Record<string, number> = { error: 0, warn: 1, info: 2 };
-const configuredLogLevel = LOG_LEVEL_MAP[config.logLevel] ?? 2;
-
-// OBS-02: structured logger with LOG_LEVEL gating
-function log(level: 'info' | 'warn' | 'error', data: Record<string, unknown>): void {
-    const entryLevel = LOG_LEVEL_MAP[level] ?? 2;
-    if (entryLevel <= configuredLogLevel) {
-        console.log(JSON.stringify({ level, ...data }));
-    }
-}
-
-// OpenAI-style error shape (D-05 + spec §14) — used for ALL error paths
-function openaiError(
-    message: string,
-    type: string,
-    code: string | number,
-    param: string | null = null,
-    status: number = 400
-): Response {
-    return new Response(
-        JSON.stringify({ error: { message, type, code, param } }),
-        { status, headers: { 'Content-Type': 'application/json' } }
-    );
-}
-
-// D-12 (Phase 7): Gemini error shape — { error: { code, message, status } }, NO `type` field.
-// Distinct from openaiError above; used for EVERY error path on the /v1beta/.../:generateContent route
-// so a migrating n8n Gemini node sees Gemini-shaped errors, never OpenAI leakage (GEM-09, GEM-12).
-// `code` is the HTTP status (int); `status` is the Gemini UPPER_SNAKE_CASE token
-// (401→UNAUTHENTICATED, 400→INVALID_ARGUMENT, 503→UNAVAILABLE).
-function geminiError(code: number, message: string, status: string): Response {
-    return new Response(
-        JSON.stringify({ error: { code, message, status } }),
-        { status: code, headers: { 'Content-Type': 'application/json' } }
-    );
-}
-
-// AUTH-01..04: extract Bearer token — never log or echo value
-function extractBearerToken(request: Request): string | null {
-    const header = request.headers.get('Authorization');
-    if (!header?.startsWith('Bearer ')) return null;
-    return header.slice(7);
-}
-
-// AUTH-03: constant-time comparison — pad both buffers to maxLen so timingSafeEqual always runs.
-// The prior length pre-check leaked the key's byte length as a timing oracle (CR-01).
-function verifyToken(token: string, expected: string): boolean {
-    const enc = new TextEncoder();
-    const a = enc.encode(token);
-    const b = enc.encode(expected);
-    const maxLen = Math.max(a.length, b.length);
-    const paddedA = new Uint8Array(maxLen);
-    const paddedB = new Uint8Array(maxLen);
-    paddedA.set(a);
-    paddedB.set(b);
-    // timingSafeEqual always runs — no length oracle
-    return timingSafeEqual(paddedA, paddedB) && a.length === b.length;
-}
-
-function authNotConfiguredError(): Response {
-    return openaiError(
-        'Proxy authentication is not configured.',
-        'server_error',
-        'proxy_not_configured',
-        null,
-        503
-    );
-}
+// OBS-02: structured logger with LOG_LEVEL gating — now the Logger port adapter
+const logger = createConsoleLogger(config.logLevel);
+const log = (level: 'info' | 'warn' | 'error', data: Record<string, unknown>): void => {
+    logger.log(level, data);
+};
 
 function parseRateLimitHeaders(provider: Provider, headers: HeaderSource) {
     return provider === 'cerebras'
@@ -126,16 +66,14 @@ export function createServer(
         maxRequestBodySize: Math.max(config.audioMaxFileBytes, config.maxRequestBodyBytes),
         async fetch(request, server) {
             // OBS-01: generate request ID at the very top — attached to every response
-            const requestId = crypto.randomUUID();
+            const requestId = newRequestId();
             const requestStart = Date.now();
             const url = new URL(request.url);
             const { pathname } = url;
 
             // OBS-01: rebuild response with X-Request-ID header on every non-streaming return
             function withRequestId(response: Response): Response {
-                const headers = new Headers(response.headers);
-                headers.set('X-Request-ID', requestId);
-                return new Response(response.body, { status: response.status, headers });
+                return attachRequestId(response, requestId);
             }
 
             // EP-04: GET /health — no auth required (healthcheck para EasyPanel / reverse proxies)
