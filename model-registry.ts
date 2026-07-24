@@ -1,49 +1,33 @@
-// model-registry.ts — logical model alias registry (REG-01..04)
-// Parse MODEL_REGISTRY_JSON once at module load; throw on invalid JSON.
+// Phase 8 compatibility shim — removed in plan 08-04. Import from './domain/model-registry'.
+// Composition edge: parses MODEL_REGISTRY_JSON once at module load and binds one default
+// registry instance. Throw-on-invalid-JSON semantics are part of the current startup contract.
 import { config } from './config';
+import { createModelRegistry } from './domain/model-registry';
 
-type RegistryEntry = Record<string, string>; // { cerebras: "...", groq: "..." }
+type RegistryEntry = Record<string, string>;
 type Registry = Record<string, RegistryEntry>;
 
-let registry: Registry;
+let parsed: Registry;
 try {
-    registry = JSON.parse(config.modelRegistryJson) as Registry;
+    parsed = JSON.parse(config.modelRegistryJson) as Registry;
 } catch {
     throw new Error(`MODEL_REGISTRY_JSON is not valid JSON`);
 }
 
-// REG-03: returns undefined if alias has no mapping for that provider
+const defaultRegistry = createModelRegistry(parsed);
+
 export function resolveUpstreamModel(alias: string, provider: string): string | undefined {
-    return registry[alias]?.[provider];
+    return defaultRegistry.resolveUpstreamModel(alias, provider);
 }
 
-// REG-01: check alias exists in registry
 export function isKnownAlias(alias: string): boolean {
-    return alias in registry;
+    return defaultRegistry.isKnownAlias(alias);
 }
 
-// REG-04: return stable alias IDs only (for GET /v1/models)
 export function listAliases(): string[] {
-    return Object.keys(registry);
+    return defaultRegistry.listAliases();
 }
 
-// D-07: rewrite upstream model IDs in text back to logical alias — prevents provider ID leak in error messages
-// Sorts by descending upstream ID length for safety (longer IDs matched first to avoid prefix collisions)
 export function rewriteUpstreamModelIds(text: string): string {
-    // Collect all (upstreamId, alias) pairs, sorted by descending upstream ID length
-    const pairs: Array<{ upstreamId: string; alias: string }> = [];
-    for (const alias of listAliases()) {
-        const entry = registry[alias];
-        if (!entry) continue;
-        for (const upstreamId of Object.values(entry)) {
-            pairs.push({ upstreamId, alias });
-        }
-    }
-    pairs.sort((a, b) => b.upstreamId.length - a.upstreamId.length);
-
-    let result = text;
-    for (const { upstreamId, alias } of pairs) {
-        result = result.split(upstreamId).join(alias);
-    }
-    return result;
+    return defaultRegistry.rewriteUpstreamModelIds(text);
 }
