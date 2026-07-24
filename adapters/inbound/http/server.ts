@@ -1,108 +1,81 @@
-// adapters/inbound/http/server.ts — the Bun.serve() delivery adapter and the composition of
-// ports into use cases. Signature and defaults are identical to the pre-refactor index.ts factory.
+// adapters/inbound/http/server.ts — the Bun.serve() delivery adapter.
+// Dependencies come from the composition root; this module wires use cases to routes and owns
+// nothing but transport. Signature and defaults are identical to the pre-refactor factory, plus
+// an optional 5th `deps` parameter so a test can inject its own store or providers.
 import { config } from '../../../config';
-import { systemClock } from '../../outbound/system-clock';
-import { toUpstreamFailure } from '../../outbound/sdk-error-mapper';
-import { createConsoleLogger } from '../../outbound/console-logger';
-import { isKnownAlias, listAliases, resolveUpstreamModel, rewriteUpstreamModelIds } from '../../../model-registry';
-import {
-    advanceCursor,
-    chooseEligibleProviders,
-    getStateSnapshot,
-    isEligible,
-    recordFailure,
-    recordSuccess,
-    resetForTesting,
-    setCooldown,
-    setRateLimitSnapshot,
-} from '../../../routing/provider-state';
-import { NoopWhisperService } from '../../outbound/noop-whisper';
+import { buildContainer, getDefaultContainer } from '../../../composition/container';
 import { transcribeAudio } from '../../../application/use-cases/transcribe-audio';
 import { createChatCompletion } from '../../../application/use-cases/create-chat-completion';
 import { streamChatCompletion } from '../../../application/use-cases/stream-chat-completion';
 import { getReadiness } from '../../../application/use-cases/get-readiness';
 import { listModels } from '../../../application/use-cases/list-models';
 import { getProviderStatus } from '../../../application/use-cases/get-provider-status';
+import { toUpstreamFailure } from '../../outbound/sdk-error-mapper';
 import { newRequestId, withRequestId } from './middleware/request-id';
 import { routeRequest } from './router';
+import type { Container } from '../../../composition/container';
 import type { ChatUseCaseDeps } from '../../../application/use-cases/chat-deps';
-import type { ModelRegistry } from '../../../domain/model-registry';
 import type { ProviderId } from '../../../domain/types';
 import type { ChatProviderPort } from '../../../application/ports/chat-provider';
-import type { ProviderStateStore } from '../../../application/ports/provider-state-store';
 import type { TranscriptionPort } from '../../../application/ports/transcription';
 import type { RouteContext, ServerDeps } from './context';
 
-// OBS-02: structured logger with LOG_LEVEL gating — the Logger port adapter
-const logger = createConsoleLogger(config.logLevel);
-
-// The routing/provider-state shim exposes free functions bound to ONE module-level store instance,
-// matching today's lifetime exactly. Wrapping them as the port lets the use cases depend on an
-// interface rather than a module. Plan 08-04 replaces this with composition/container.ts.
-const providerStore: ProviderStateStore = {
-    isEligible,
-    chooseEligibleProviders,
-    advanceCursor,
-    setCooldown,
-    setRateLimitSnapshot,
-    recordSuccess,
-    recordFailure,
-    getSnapshot: getStateSnapshot,
-    reset: resetForTesting,
-};
-
-const modelRegistry: ModelRegistry = {
-    resolveUpstreamModel,
-    isKnownAlias,
-    listAliases,
-    rewriteUpstreamModelIds,
-};
-
 // D-02: exported factory — importing this module does NOT bind a port
 export function createServer(
-    adapters: Record<ProviderId, ChatProviderPort>,
+    adapters?: Record<ProviderId, ChatProviderPort>,
     port: number = config.port,
-    whisperService: TranscriptionPort = new NoopWhisperService(),
-    audioMaxFileBytes: number = config.audioMaxFileBytes
+    whisperService?: TranscriptionPort,
+    audioMaxFileBytes: number = config.audioMaxFileBytes,
+    deps?: Partial<Container>
 ): ReturnType<typeof Bun.serve> {
+    // Without injected deps every server shares the one default container, so all of them
+    // observe the same provider-state store. With deps, the caller gets its own graph.
+    const container = deps ? buildContainer(config, deps) : getDefaultContainer(config);
+
+    // Explicit positional arguments win over the container — they are how every existing
+    // test injects mock adapters and a mock whisper service.
+    const chatProviders = adapters ?? container.chatProviders;
+    const transcription = whisperService ?? container.transcription;
+    const { logger, clock, registry, store } = container;
+
     // toFailure is injected so the application layer never imports the vendor-aware mapper.
     const chatDeps: ChatUseCaseDeps = {
-        providers: adapters,
-        store: providerStore,
-        registry: modelRegistry,
+        providers: chatProviders,
+        store,
+        registry,
         logger,
-        clock: systemClock,
+        clock,
         maxAttempts: config.maxProviderAttemptsPerRequest,
         defaultCooldownSeconds: config.defaultCooldownSeconds,
         toFailure: toUpstreamFailure,
     };
 
-    const deps: ServerDeps = {
+    const serverDeps: ServerDeps = {
         logger,
         audioMaxFileBytes,
         maxRequestBodyBytes: config.maxRequestBodyBytes,
         exposeProviderHeader: config.exposeProviderHeader,
         enableInternalStatusEndpoint: config.enableInternalStatusEndpoint,
-        // Read LIVE per request, not captured at createServer() time: `config` is typed
-        // `as const` but is not frozen at runtime, and tests/integration/server.test.ts mutates
-        // config.defaultModelAlias around individual cases and restores it afterwards.
+        // Read LIVE per request, not captured at createServer() time: `config` is not frozen at
+        // runtime and tests/integration/server.test.ts mutates config.defaultModelAlias around
+        // individual cases and restores it afterwards.
         get defaultModelAlias() { return config.defaultModelAlias; },
         defaultMaxCompletionTokens: config.defaultMaxCompletionTokens,
-        isKnownAlias: modelRegistry.isKnownAlias,
-        transcribeAudio: transcribeAudio({ transcription: whisperService, logger }),
+        isKnownAlias: registry.isKnownAlias,
+        transcribeAudio: transcribeAudio({ transcription, logger }),
         createChatCompletion: createChatCompletion(chatDeps),
         streamChatCompletion: streamChatCompletion(chatDeps),
         getReadiness: getReadiness({
-            store: providerStore,
-            transcription: whisperService,
-            listAliases: modelRegistry.listAliases,
+            store,
+            transcription,
+            listAliases: registry.listAliases,
             proxyKeyConfigured: Boolean(config.personalProxyApiKey),
         }),
         listModels: listModels({
-            listAliases: modelRegistry.listAliases,
+            listAliases: registry.listAliases,
             whisperModelAlias: config.whisperModelAlias,
         }),
-        getProviderStatus: getProviderStatus({ store: providerStore }),
+        getProviderStatus: getProviderStatus({ store }),
     };
 
     return Bun.serve({
@@ -116,7 +89,7 @@ export function createServer(
             const requestStart = Date.now();
             const url = new URL(request.url);
 
-            const ctx: RouteContext = { request, url, requestId, requestStart, server, deps };
+            const ctx: RouteContext = { request, url, requestId, requestStart, server, deps: serverDeps };
 
             const response = await routeRequest(ctx, config.personalProxyApiKey);
 

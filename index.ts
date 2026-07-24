@@ -1,23 +1,22 @@
 // index.ts — process entrypoint.
-// The HTTP delivery layer lives in adapters/inbound/http/. See ARCHITECTURE.md for the layer map.
+// The HTTP delivery layer lives in adapters/inbound/http/; all wiring lives in
+// composition/container.ts. See ARCHITECTURE.md for the layer map.
 import { config } from './config';
+import { buildContainer } from './composition/container';
 import { createServer } from './adapters/inbound/http/server';
-import { cerebrasAdapter } from './services/cerebras';
-import { groqAdapter } from './services/groq';
-import { HttpWhisperService, NoopWhisperService } from './whisper-service';
 
 // D-02: re-exported so tests and embedders can boot a server without running this file.
 export { createServer };
 
 // Entrypoint guard — bun index.ts boots the server; import { createServer } from './index' does not
 if (import.meta.main) {
-    const whisperService = config.whisperModelAlias !== null
-        ? new HttpWhisperService()
-        : new NoopWhisperService();
+    const container = buildContainer(config);
     const server = createServer(
-        { cerebras: cerebrasAdapter, groq: groqAdapter },
+        container.chatProviders,
         config.port,
-        whisperService
+        container.transcription,
+        config.audioMaxFileBytes,
+        container
     );
     console.log(`Server is running on ${server.url}`);
 }

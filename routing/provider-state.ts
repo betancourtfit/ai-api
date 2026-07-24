@@ -1,37 +1,26 @@
-// Phase 8 compatibility shim — removed in plan 08-04.
-// Domain: domain/provider-state.ts (createProviderStateStore)
-//
-// Holds the ONE default store instance, matching today's module-global lifetime exactly,
-// and forwards every legacy export — including resetForTesting(), which tests call in
-// beforeEach. Plan 08-04 moves this instance into composition/container.ts.
+// Phase 8 compatibility shim — deleted in plan 08-04 Task 4.
+// Forwards to the store held by the default container, which is the SAME instance every
+// createServer() call without injected deps uses. That is what keeps resetForTesting()
+// meaningful for the integration suite until the tests are rewired.
 import { config } from "../config";
-import { resolveUpstreamModel } from "../model-registry";
-import { createProviderStateStore } from "../domain/provider-state";
+import { getDefaultContainer } from "../composition/container";
 import type { ProviderId, ProviderState } from "../domain/types";
 
 export type Provider = ProviderId;
 export type { ProviderState };
 
-const defaultStore = createProviderStateStore({
-    order: config.providerOrder as ProviderId[],
-    clock: { now: () => Date.now() },
-    configured: {
-        cerebras: Boolean(config.cerebrasApiKey),
-        groq: Boolean(config.groqApiKey),
-    },
-    resolveUpstreamModel,
-});
+const store = () => getDefaultContainer(config).store;
 
 export function isEligible(provider: Provider, logicalModel: string): boolean {
-    return defaultStore.isEligible(provider, logicalModel);
+    return store().isEligible(provider, logicalModel);
 }
 
 export function chooseEligibleProviders(logicalModel: string): Provider[] {
-    return defaultStore.chooseEligibleProviders(logicalModel);
+    return store().chooseEligibleProviders(logicalModel);
 }
 
 export function advanceCursor(): void {
-    defaultStore.advanceCursor();
+    store().advanceCursor();
 }
 
 export function setCooldown(
@@ -39,25 +28,25 @@ export function setCooldown(
     untilMs: number,
     snapshot?: Record<string, string>
 ): void {
-    defaultStore.setCooldown(provider, untilMs, snapshot);
+    store().setCooldown(provider, untilMs, snapshot);
 }
 
 export function setRateLimitSnapshot(provider: Provider, snapshot: Record<string, string>): void {
-    defaultStore.setRateLimitSnapshot(provider, snapshot);
+    store().setRateLimitSnapshot(provider, snapshot);
 }
 
 export function recordSuccess(provider: Provider, statusCode: number): void {
-    defaultStore.recordSuccess(provider, statusCode);
+    store().recordSuccess(provider, statusCode);
 }
 
 export function recordFailure(provider: Provider, statusCode: number): void {
-    defaultStore.recordFailure(provider, statusCode);
+    store().recordFailure(provider, statusCode);
 }
 
 export function getStateSnapshot(): Record<Provider, ProviderState> {
-    return defaultStore.getSnapshot();
+    return store().getSnapshot();
 }
 
 export function resetForTesting(): void {
-    defaultStore.reset();
+    store().reset();
 }
