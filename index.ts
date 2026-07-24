@@ -6,6 +6,10 @@ import { geminiError } from './adapters/inbound/http/presenters/gemini-error';
 import { newRequestId, withRequestId as attachRequestId } from './adapters/inbound/http/middleware/request-id';
 import { extractBearerToken, verifyToken } from './adapters/inbound/http/middleware/bearer-auth';
 import { createConsoleLogger } from './adapters/outbound/console-logger';
+import { matchTranscriptions, handleTranscriptions } from './adapters/inbound/http/routes/transcriptions';
+import { matchGeminiGenerateContent, handleGeminiGenerateContent } from './adapters/inbound/http/routes/gemini-generate-content';
+import { transcribeAudio } from './application/use-cases/transcribe-audio';
+import type { RouteContext, ServerDeps } from './adapters/inbound/http/context';
 import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
 import { validateAudioFileSize, validateAudioTranscription } from './audio-schema';
 import { validateChatCompletion } from './request-schema';
@@ -59,6 +63,12 @@ export function createServer(
     whisperService: WhisperService = new NoopWhisperService(),
     audioMaxFileBytes: number = config.audioMaxFileBytes
 ): ReturnType<typeof Bun.serve> {
+    const serverDeps: ServerDeps = {
+        logger,
+        audioMaxFileBytes,
+        transcribeAudio: transcribeAudio({ transcription: whisperService, logger }),
+    };
+
     return Bun.serve({
         hostname: config.hostname,
         port,
@@ -75,6 +85,14 @@ export function createServer(
             function withRequestId(response: Response): Response {
                 return attachRequestId(response, requestId);
             }
+
+            const routeCtx = (): RouteContext => ({
+                request,
+                url,
+                requestId,
+                requestStart,
+                deps: serverDeps,
+            });
 
             // EP-04: GET /health — no auth required (healthcheck para EasyPanel / reverse proxies)
             // BUILD_VERSION (git SHA, baked at image build) lets you confirm WHICH build is live.
@@ -106,186 +124,10 @@ export function createServer(
                 ));
             }
 
-            // POST /v1beta/models/{model}:generateContent — Gemini-wire-compatible transcription shim (Phase 7).
+            // POST /v1beta/models/{model}:generateContent — Gemini-wire-compatible transcription shim.
             // Placed BEFORE the global Bearer gate (D-01): Gemini auth is ?key= / x-goog-api-key, not Bearer.
-            // OUT OF SCOPE (GEM-15): :streamGenerateContent (Gemini SSE — falls through to the 404 handler),
-            //   file_data Files-API URIs (rejected as 400 below), and multi-candidate responses
-            //   (always a single candidate at index 0). Do not implement here.
-            if (
-                request.method === 'POST'
-                && pathname.startsWith('/v1beta/models/')
-                && pathname.endsWith(':generateContent')
-            ) {
-                const model = pathname.slice(
-                    '/v1beta/models/'.length,
-                    pathname.length - ':generateContent'.length
-                );
-
-                // 1. Auth (D-03/D-04, GEM-02/09): x-goog-api-key header first, then ?key= query param.
-                //    Missing config OR missing/invalid key → Gemini-shaped 401 (NOT openaiError).
-                const apiKey = request.headers.get('x-goog-api-key')
-                    ?? url.searchParams.get('key');
-                if (
-                    !config.personalProxyApiKey
-                    || !apiKey
-                    || !verifyToken(apiKey, config.personalProxyApiKey)
-                ) {
-                    return withRequestId(geminiError(
-                        401,
-                        'API key not valid. Please pass a valid API key.',
-                        'UNAUTHENTICATED'
-                    ));
-                }
-
-                // IN-02: sanity-bound the echoed model segment (post-auth so we don't reveal
-                // anything to unauthenticated callers). It is echoed into modelVersion and logs;
-                // reject path-injecting or absurdly long values before doing any work.
-                if (model.length === 0 || model.includes('/') || model.length > 200) {
-                    return withRequestId(geminiError(
-                        400,
-                        'Invalid model identifier.',
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-
-                // 2. Parse JSON body (D-07 step 2).
-                let body: unknown;
-                try {
-                    body = await request.json();
-                } catch {
-                    return withRequestId(geminiError(
-                        400,
-                        'Invalid JSON request body.',
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-
-                // 3. Scan parts (D-05/D-07): file_data anywhere → out-of-scope 400 (GEM-04);
-                //    else capture the FIRST inline_data part with both data and mime_type.
-                //    WR-02: typed narrowing on `unknown` instead of `any` so strict-mode /
-                //    noUncheckedIndexedAccess guarantees still apply to every property access.
-                const rawContents = (body as { contents?: unknown } | null | undefined)?.contents;
-                const contents: unknown[] = Array.isArray(rawContents) ? rawContents : [];
-                let inlineData: { data: string; mime_type: string } | null = null;
-                for (const content of contents) {
-                    const rawParts = (content as { parts?: unknown } | null | undefined)?.parts;
-                    const parts: unknown[] = Array.isArray(rawParts) ? rawParts : [];
-                    for (const part of parts) {
-                        const partObj = part as { file_data?: unknown; inline_data?: unknown } | null | undefined;
-                        // WR-04: reject only when file_data is truthy — a `{ file_data: null }`
-                        // part that also carries valid inline_data must not be falsely rejected.
-                        if (partObj && partObj.file_data) {
-                            return withRequestId(geminiError(
-                                400,
-                                'file_data (Files API) input is not supported by this proxy.',
-                                'INVALID_ARGUMENT'
-                            ));
-                        }
-                        const id = partObj?.inline_data as { data?: unknown; mime_type?: unknown } | null | undefined;
-                        if (!inlineData && id
-                            && typeof id.data === 'string' && id.data
-                            && typeof id.mime_type === 'string' && id.mime_type) {
-                            inlineData = { data: id.data, mime_type: id.mime_type };
-                        }
-                    }
-                }
-
-                // 4. No inline audio part found → Gemini-shaped 400 (GEM-10).
-                if (!inlineData) {
-                    return withRequestId(geminiError(
-                        400,
-                        'No inline audio data found in request.',
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-
-                // 5. Decode base64 → File using native Buffer + File only (D-06, GEM-13).
-                //    Filename is the literal 'audio' — never derived from untrusted input.
-                //    WR-01: bound the *encoded* length before allocating the decoded buffer.
-                //    base64 length * 3/4 ≈ decoded byte count, a safe upper-bound proxy, so an
-                //    oversize payload is rejected before the ~18 MiB decode allocation (DoS).
-                const approxBytes = Math.floor(inlineData.data.length * 3 / 4);
-                if (approxBytes > audioMaxFileBytes) {
-                    return withRequestId(geminiError(
-                        400,
-                        `File too large. Maximum allowed size is ${audioMaxFileBytes} bytes.`,
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-                const bytes = Buffer.from(inlineData.data, 'base64');
-                // HG-01: reject empty/zero-length decoded audio. Buffer.from(..., 'base64') is
-                // lenient (never throws, silently drops non-alphabet chars), so garbage or
-                // whitespace-only input can decode to 0 bytes and otherwise reach the sidecar.
-                if (bytes.length === 0) {
-                    return withRequestId(geminiError(
-                        400,
-                        'Inline audio data is empty or not valid base64.',
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-                const file = new File([bytes], 'audio', { type: inlineData.mime_type });
-
-                // 6. Size check (D-07/GEM-11) — reuse validateAudioFileSize.
-                const sizeCheck = validateAudioFileSize(file, audioMaxFileBytes);
-                if (!sizeCheck.ok) {
-                    return withRequestId(geminiError(
-                        400,
-                        sizeCheck.message,
-                        'INVALID_ARGUMENT'
-                    ));
-                }
-
-                // 7. Transcribe (D-08/D-13). Do NOT require model === whisperModelAlias.
-                let result: AudioTranscriptionResult;
-                try {
-                    result = await whisperService.transcribe(file, config.whisperModelAlias ?? model);
-                } catch {
-                    log('warn', {
-                        event: 'gemini_transcription_failed',
-                        requestId,
-                        route: `${request.method} ${pathname}`,
-                        modelAlias: model,
-                        fileSize: file.size,
-                        status: 503,
-                        latencyMs: Date.now() - requestStart,
-                    });
-                    return withRequestId(geminiError(
-                        503,
-                        'Transcription service is unavailable.',
-                        'UNAVAILABLE'
-                    ));
-                }
-
-                // 8. Success body (D-09/D-10/D-11). Estimated token counts; echo model in modelVersion.
-                const estTokens = Math.ceil(result.text.length / 4);
-                log('info', {
-                    event: 'gemini_transcription_complete',
-                    requestId,
-                    timestamp: new Date(requestStart).toISOString(),
-                    route: `${request.method} ${pathname}`,
-                    modelAlias: model,
-                    fileSize: file.size,
-                    status: 200,
-                    latencyMs: Date.now() - requestStart,
-                });
-                return withRequestId(new Response(
-                    JSON.stringify({
-                        candidates: [
-                            {
-                                content: { role: 'model', parts: [{ text: result.text }] },
-                                finishReason: 'STOP',
-                                index: 0,
-                            },
-                        ],
-                        usageMetadata: {
-                            promptTokenCount: 0,
-                            candidatesTokenCount: estTokens,
-                            totalTokenCount: estTokens,
-                        },
-                        modelVersion: model,
-                    }),
-                    { status: 200, headers: { 'Content-Type': 'application/json' } }
-                ));
+            if (matchGeminiGenerateContent(request.method, pathname)) {
+                return withRequestId(await handleGeminiGenerateContent(routeCtx()));
             }
 
             // --- Auth gate — all routes below require Bearer PERSONAL_PROXY_API_KEY ---
@@ -305,94 +147,8 @@ export function createServer(
             }
 
             // POST /v1/audio/transcriptions — multipart transcription endpoint (EP2-01)
-            if (request.method === 'POST' && pathname === '/v1/audio/transcriptions') {
-                let formData: FormData;
-                try {
-                    formData = await request.formData();
-                } catch {
-                    return withRequestId(openaiError(
-                        'Failed to parse multipart form data.',
-                        'invalid_request_error',
-                        'invalid_request_error',
-                        null,
-                        400
-                    ));
-                }
-
-                const rawInput: Record<string, unknown> = {};
-                for (const [key, value] of formData.entries()) {
-                    rawInput[key] = value;
-                }
-
-                const validation = validateAudioTranscription(rawInput);
-                if (!validation.success) {
-                    return withRequestId(openaiError(
-                        validation.message,
-                        'invalid_request_error',
-                        'invalid_request_error',
-                        validation.param,
-                        400
-                    ));
-                }
-
-                const input = validation.data;
-
-                const sizeCheck = validateAudioFileSize(input.file, audioMaxFileBytes);
-                if (!sizeCheck.ok) {
-                    return withRequestId(openaiError(
-                        sizeCheck.message,
-                        'invalid_request_error',
-                        'request_too_large',
-                        'file',
-                        413
-                    ));
-                }
-
-                const isKnownWhisperAlias = config.whisperModelAlias !== null
-                    && input.model === config.whisperModelAlias;
-                if (!isKnownWhisperAlias) {
-                    return withRequestId(openaiError(
-                        `Unknown model '${input.model}'.`,
-                        'invalid_request_error',
-                        'model_not_found',
-                        'model',
-                        400
-                    ));
-                }
-
-                try {
-                    const result = await whisperService.transcribe(input.file, input.model);
-                    log('info', {
-                        event: 'transcription_complete',
-                        requestId,
-                        timestamp: new Date(requestStart).toISOString(),
-                        route: `${request.method} ${pathname}`,
-                        modelAlias: input.model,
-                        fileSize: input.file.size,
-                        status: 200,
-                        latencyMs: Date.now() - requestStart,
-                    });
-                    return withRequestId(new Response(JSON.stringify(result), {
-                        status: 200,
-                        headers: { 'Content-Type': 'application/json' },
-                    }));
-                } catch {
-                    log('warn', {
-                        event: 'transcription_failed',
-                        requestId,
-                        modelAlias: input.model,
-                        fileSize: input.file.size,
-                        status: 503,
-                        latencyMs: Date.now() - requestStart,
-                    });
-                    return withRequestId(openaiError(
-                        'Transcription service is unavailable.',
-                        'server_error',
-                        'service_unavailable',
-                        null,
-                        503
-                    ));
-                }
+            if (matchTranscriptions(request.method, pathname)) {
+                return withRequestId(await handleTranscriptions(routeCtx()));
             }
 
             if (request.method === 'GET' && pathname === '/internal/providers/status') {
