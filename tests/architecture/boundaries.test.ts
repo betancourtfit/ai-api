@@ -130,6 +130,42 @@ describe('architecture boundaries', () => {
         expect(violations).toEqual([]);
     });
 
+    // Plan 08-03: use cases are orchestration, not delivery. They must not name an HTTP type,
+    // emit SSE framing, or reach an adapter — presenters own every byte of wire format.
+    test('application/use-cases/ contains no delivery-layer constructs', async () => {
+        const files = await collect('application/use-cases/**/*.ts');
+        expect(files.length).toBeGreaterThan(0);
+
+        const forbidden: Array<{ label: string; pattern: RegExp }> = [
+            { label: 'Response (HTTP type)', pattern: /\bnew Response\b|:\s*Response\b|<\s*Response\b/ },
+            { label: 'Request (HTTP type)', pattern: /\bnew Request\b|:\s*Request\b|<\s*Request\b/ },
+            { label: 'Headers (WHATWG type)', pattern: /\bnew Headers\b|:\s*Headers\b|<\s*Headers\b/ },
+            { label: 'text/event-stream', pattern: /text\/event-stream/ },
+            { label: 'SSE data frame', pattern: /["'`]data: / },
+            { label: '[DONE] sentinel', pattern: /\[DONE\]/ },
+            { label: 'Bun.serve', pattern: /Bun\.serve/ },
+            { label: 'zod', pattern: /from\s*['"]zod['"]/ },
+            { label: 'groq-sdk', pattern: /groq-sdk/ },
+            { label: '@cerebras/', pattern: /@cerebras\// },
+            { label: 'process.env', pattern: /process\.env/ },
+            { label: 'adapters import', pattern: /from\s*['"][^'"]*adapters\// },
+            { label: 'config import', pattern: /from\s*['"][^'"]*\/config['"]/ },
+        ];
+
+        const violations: string[] = [];
+
+        for (const file of files) {
+            const source = await Bun.file(`${REPO_ROOT}${file}`).text();
+            for (const { label, pattern } of forbidden) {
+                if (pattern.test(source)) {
+                    violations.push(`${file}: forbidden construct '${label}'`);
+                }
+            }
+        }
+
+        expect(violations).toEqual([]);
+    });
+
     test('adapters/ and config are never reachable from the inner layers', async () => {
         const files = [...await collect('domain/**/*.ts'), ...await collect('application/**/*.ts')];
         expect(files.length).toBeGreaterThan(0);
