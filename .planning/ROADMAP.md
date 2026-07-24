@@ -17,7 +17,7 @@
 - [x] **Phase 5: Transcription Route + Auth + Tests** - Full /v1/audio/transcriptions request lifecycle with mocked WhisperService and 100% test coverage (completed 2026-06-06)
 - [x] **Phase 6: Whisper Sidecar + Models + Ready** - Real HTTP fetch to whisper-server sidecar, /v1/models whisper alias, and /ready whisperAvailable field (completed 2026-06-06)
 - [x] **Phase 7: Gemini-Compatible Transcription Shim** - New `POST /v1beta/models/{model}:generateContent` route, wire-compatible with Google Gemini for audio transcription, so n8n nodes migrate by changing only URL + API key (TDD: spec test pre-committed) (completed 2026-06-17)
-- [ ] **Phase 8: Hexagonal Architecture Audit + Refactor** - Architect audit of Clean/Hexagonal compliance with clear boundaries, gap diagnosis, and refactor to the target architecture with no behavior change
+- [x] **Phase 8: Hexagonal Architecture Audit + Refactor** - Architect audit of Clean/Hexagonal compliance with clear boundaries, gap diagnosis, and refactor to the target architecture with no behavior change
 
 ---
 
@@ -176,11 +176,12 @@ Plans:
 
 ### Phase 8: Hexagonal Architecture Audit + Refactor
 
-**Goal:** The codebase is audited against Clean/Hexagonal Architecture with explicit boundaries (domain core, ports, adapters, composition root), the gaps are documented with evidence per file, and the code is refactored to satisfy the target guidelines — with all 104 existing tests still green and zero behavior change on the public wire contract.
+**Goal:** The codebase is audited against Clean/Hexagonal Architecture with explicit boundaries (domain core, ports, adapters, composition root), the gaps are documented with evidence per file, and the code is refactored to satisfy the target guidelines — with all existing tests still green and zero behavior change on the public wire contract. (The "104 tests" figure originally written here was stale; the measured pre-phase baseline was 111.)
 
 **Requirements:** HEX-01, HEX-02, HEX-03, HEX-04, HEX-05, HEX-06, HEX-07, HEX-08, HEX-09, HEX-10, HEX-11, HEX-12, HEX-13, HEX-14, HEX-15
 **Depends on:** Phase 7
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans executed
+**Status:** COMPLETE (2026-07-24) — 15/15 requirements, 119/119 tests, UAT 3/3 against live providers, security 24/24 threats closed. `index.ts` 1,012 → 22 LOC; layers at `domain/ application/ adapters/ composition/` (48 modules); zero new dependencies.
 
 Scope:
 

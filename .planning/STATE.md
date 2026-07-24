@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: milestone
-status: verifying
-last_updated: "2026-07-24T02:26:12.668Z"
-last_activity: 2026-07-24 -- Phase 08 execution started
+status: complete
+last_updated: "2026-07-24T03:25:00.000Z"
+last_activity: 2026-07-24 -- Phase 08 verified, secured, and marked complete
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 20
-  completed_plans: 19
-  percent: 88
+  completed_plans: 20
+  percent: 100
 ---
 
 # State: bun-ai-api OpenAI-Compatible Proxy Refactor
@@ -23,12 +23,12 @@ progress:
 
 ## Current Position
 
-Phase: 08 (hexagonal-architecture-audit-refactor) — EXECUTING
+Phase: 08 (hexagonal-architecture-audit-refactor) — COMPLETE
 Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-07-24 -- Phase 08 execution started
+Status: Verified (15/15 requirements, 119/119 tests, UAT 3/3 live) and secured (24/24 threats closed). Milestone v2.0 has no phases remaining.
+Last activity: 2026-07-24 -- Phase 08 verified, secured, and marked complete
 
-Progress bar: █████████░ 88% (7/8 phases)
+Progress bar: ██████████ 100% (8/8 phases)
 
 ## Performance Metrics
 
@@ -84,9 +84,17 @@ None
 
 ## Session Continuity
 
-**Last action:** Phase 8 planned — architecture research + audit written to `08-RESEARCH.md` (15 violations V-01..V-15, 2 critical / 5 high / 6 medium / 2 low), 15 HEX requirements derived into REQUIREMENTS.md, 4 sequential plans created. Measured baseline: `bun test` 111 pass / 0 fail (ROADMAP's "104 tests" was stale). No CONTEXT.md — planned from ROADMAP scope + research.
-**Next action:** Execute Phase 8 — `/gsd-execute-phase 8`.
+**Last action:** Phase 8 closed out. Executed (4 plans, 24 commits, `index.ts` 1,012 → 22 LOC, layers at `domain/ application/ adapters/ composition/`, 48 modules, 8 executable boundary guards, zero new deps, 111 → 119 tests). Verified 15/15 requirements. UAT 3/3 walked against **live** Cerebras and Groq — non-streaming, streaming SSE with a single `[DONE]`, and A-B-A-B round-robin alternation with no key material in `/internal/providers/status`. Security audit SECURED: 24/24 threats closed, `threats_open: 0`.
+**Next action:** Milestone v2.0 has no phases remaining — `/gsd-complete-milestone` to archive, or `/gsd-new-milestone` to open the next one.
 **Resume file:** None
+
+### Carried-forward debt (from Phase 8)
+
+- Upstream abort on client disconnect is unverified — UAT confirmed the server survives a mid-stream disconnect, not that the provider request is actually cancelled. Wastes quota if broken; no data exposure.
+- The 429 cooldown / failover path never ran against a real provider; covered by mock-based tests only.
+- `bunx tsc --noEmit` reports 7 pre-existing errors and no typecheck gate is wired into CI.
+- `dist/index.js` is a stale pre-Phase-1 build artifact still in the tree.
+- The new use cases are headlessly testable but have no direct unit tests yet.
 
 ---
 

@@ -1,5 +1,5 @@
 ---
-status: human_needed
+status: verified
 phase: 08-hexagonal-architecture-audit-refactor
 verifier: inline (gsd-verifier agent unavailable in this runtime)
 requirements_verified: 15
@@ -145,6 +145,15 @@ still return their own wire shapes from the now-shared use case.
 ## Verdict
 
 **Automated: PASS (15/15 requirements, 119/119 tests).**
-**Phase status: pending human verification** — run `/gsd-verify-work 08` to walk the three checks
-above. The phase is intentionally **not** marked complete in ROADMAP/STATE until a real upstream call
-confirms the "zero behavior change" claim end-to-end.
+**Human: PASS (3/3, 2026-07-24)** — all three checks walked against live Cerebras and Groq during
+`/gsd-verify-work 08`; results and evidence in `08-UAT.md`. The "zero behavior change" claim is now
+confirmed end-to-end by real upstream calls, not only by the mock-backed suite.
+
+**Security: SECURED (2026-07-24)** — 24/24 threats closed, `threats_open: 0`. See `08-SECURITY.md`.
+
+**Phase status: complete.**
+
+Two coverage limits carried forward as residual risk, recorded in `08-SECURITY.md`:
+upstream abort on client disconnect is unverified (the server survives a mid-stream disconnect,
+but the provider request may not be cancelled), and no provider returned 429 during UAT, so the
+cooldown/failover path remains covered by mock-based tests only.
