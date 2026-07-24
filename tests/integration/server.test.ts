@@ -285,7 +285,7 @@ describe('Integration: routing and streaming tests', () => {
                 429,
                 undefined,
                 'rate limited',
-                new Headers({ 'retry-after': '30' }) as ConstructorParameters<typeof CerebrasAPIError>[3]
+                new Headers({ 'retry-after': '30' }) as unknown as ConstructorParameters<typeof CerebrasAPIError>[3]
             );
         });
 
@@ -314,7 +314,7 @@ describe('Integration: routing and streaming tests', () => {
                 429,
                 undefined,
                 'rate limited',
-                new Headers({ 'retry-after': '30' }) as ConstructorParameters<typeof CerebrasAPIError>[3]
+                new Headers({ 'retry-after': '30' }) as unknown as ConstructorParameters<typeof CerebrasAPIError>[3]
             );
         });
 

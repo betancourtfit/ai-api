@@ -115,9 +115,9 @@ describe('normalizeResponse', () => {
         const result = normalizeResponse(rawWithExtras, 'gpt-oss-120b-balanced');
 
         // Top-level provider fields must not appear
-        expect((result as Record<string, unknown>)['time_info']).toBeUndefined();
-        expect((result as Record<string, unknown>)['x_groq']).toBeUndefined();
-        expect((result as Record<string, unknown>)['usage_breakdown']).toBeUndefined();
+        expect((result as unknown as Record<string, unknown>)['time_info']).toBeUndefined();
+        expect((result as unknown as Record<string, unknown>)['x_groq']).toBeUndefined();
+        expect((result as unknown as Record<string, unknown>)['usage_breakdown']).toBeUndefined();
 
         // Per-choice provider fields must not appear
         const choice = result.choices[0] as Record<string, unknown>;

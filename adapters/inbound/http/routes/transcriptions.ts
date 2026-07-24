@@ -14,7 +14,7 @@ export async function handleTranscriptions(ctx: RouteContext): Promise<Response>
     const { request, requestId, requestStart, deps } = ctx;
     const pathname = ctx.url.pathname;
 
-    let formData: FormData;
+    let formData: Awaited<ReturnType<typeof request.formData>>;
     try {
         formData = await request.formData();
     } catch {
