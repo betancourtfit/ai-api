@@ -309,8 +309,11 @@ jobs:
           # Assert the build stamp. This is the assertion closing the
           # build-args CACHEBUST -> ARG CACHEBUST -> ENV BUILD_VERSION ->
           # handleHealth chain, which has been fed by the build for two runs
-          # with nothing ever verifying it reaches runtime. GITHUB_SHA is the
-          # runner's own environment variable, not a ${{ }} interpolation.
+          # with nothing ever verifying it reaches runtime. GITHUB_SHA is read
+          # as a plain runner environment variable, deliberately NOT as a
+          # GitHub expression -- an expression is interpolated anywhere inside
+          # a run: block, including on lines that look like shell comments, so
+          # writing one here (even to describe it) is a workflow syntax error.
           health="$(curl -fsS -m 5 http://127.0.0.1:3001/health)"
           expected_health="ok ${GITHUB_SHA}"
           if [ "$health" != "$expected_health" ]; then
