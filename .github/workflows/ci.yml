@@ -46,6 +46,64 @@ jobs:
           fi
           echo "OK: no tracked env files outside the allowlist (.env.example, .env.test)"
 
+          # This repo is PUBLIC. .env.test is permanently allowlisted *by name*
+          # above, so name-based allowlisting alone cannot detect a live key
+          # pasted into it. The gate below scans every allowlisted tracked env
+          # file for known credential prefixes without ever printing a value:
+          # only the file name and a provider label are ever emitted, because
+          # this CI log is public.
+
+          # Anti-vacuous self-test first. A quoting or regex regression must
+          # never silently turn this gate into a no-op, the same failure mode
+          # the dependency-audit guard (docker-image job) guards against for
+          # its own threshold. The synthetic token is written to a file with
+          # printf, never echoed into the log.
+          selftest="$RUNNER_TEMP/env-scan-selftest"
+          printf 'GROQ_API_KEY=gsk_%s\n' "0123456789abcdefghij" > "$selftest"
+          if ! grep -qE 'gsk_[A-Za-z0-9]{20,}' "$selftest"; then
+            echo "::error::credential scanner self-test failed — the gate is vacuous"
+            rm -f "$selftest"
+            exit 1
+          fi
+          rm -f "$selftest"
+
+          # An empty result here is a legitimate state (no allowlisted env
+          # file tracked yet), not a failure.
+          allowlisted="$(git ls-files | grep -E '(^|/)\.env\.(example|test)$' || true)"
+
+          leak=0
+          if [ -n "$allowlisted" ]; then
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              # label:regex pairs. The (^|[^A-Za-z0-9]) anchor on the OpenAI
+              # pattern is load-bearing: without it, every Cerebras csk-...
+              # key also trips the OpenAI pattern, because csk- contains sk-.
+              # The {20,} floor is what keeps placeholders like sk-xxxx or
+              # csk-REPLACE_ME from firing.
+              for spec in \
+                "Groq:gsk_[A-Za-z0-9]{20,}" \
+                "Cerebras:csk-[A-Za-z0-9]{20,}" \
+                "OpenAI:(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}" \
+                "AWS:AKIA[A-Z0-9]{16}"
+              do
+                label="${spec%%:*}"
+                pattern="${spec#*:}"
+                if grep -qE "$pattern" "$file"; then
+                  echo "::error::Possible live $label credential in tracked file $file — rotate it and remove it from the file (value deliberately not printed)"
+                  leak=1
+                fi
+              done
+            done <<EOF
+          $allowlisted
+          EOF
+          fi
+
+          if [ "$leak" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "OK: no live-credential prefixes in the allowlisted env files"
+
   # Builds the production image and audits it on every push to master, but never
   # on a pull request — needs: verify so a red test suite short-circuits the
   # ~15 min build instead of wasting runner time on a doomed image. This job is
@@ -77,6 +135,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Absolute, non-decaying floor on the image's own Bun binary. 1.1.39 is
+      # the release that introduced the text lockfile format, so this floor
+      # never has to move — unlike the dependency-drift audit below, which can
+      # only detect drift for as long as versions newer than the current pins
+      # exist upstream to drift toward.
+      - name: Verify image Bun version
+        run: |
+          set -euo pipefail
+
+          bun_version="$(docker run --rm --entrypoint bun bun-ai-api:ci --version | tr -d '[:space:]')"
+          echo "Image Bun version: $bun_version"
+
+          # Anti-vacuous: an unreadable version string must never pass silently.
+          if ! printf '%s' "$bun_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not parse a semver Bun version from the image (got: '$bun_version')"
+            exit 1
+          fi
+
+          min="1.1.39"
+          lowest="$(printf '%s\n%s\n' "$min" "$bun_version" | sort -V | head -n1)"
+          if [ "$lowest" != "$min" ]; then
+            echo "::error::Image Bun version $bun_version is below the floor $min — Bun before 1.1.39 cannot read this repo's text bun.lock and silently resolves from package.json's ^ ranges instead"
+            exit 1
+          fi
+
+          echo "OK: image Bun $bun_version >= $min"
+
       # This is the step that makes the whole job worth its runtime: it catches
       # Bun < 1.1.39 silently ignoring the text bun.lock and resolving from the
       # `^` ranges in package.json instead, so `--frozen-lockfile` exits 0 having
@@ -105,11 +190,19 @@ jobs:
           count="$(printf '%s\n' "$deps" | grep -c . || true)"
           echo "Parsed $count dependency tokens from the image."
 
-          # Anti-vacuous guard: a parsing change must never turn this audit into
-          # a silent no-op. If it parsed too few tokens, or the two critical
-          # packages are absent from the listing, fail loudly.
-          if [ "$count" -lt 5 ]; then
-            echo "::error::Dependency audit parsed only $count package(s) from the image — check is vacuous, refusing to pass"
+          # Anti-vacuous guard, derived from package.json instead of a
+          # hardcoded literal so a legitimate dependency removal moves both
+          # numbers together instead of this check reporting a false
+          # "check is vacuous". peerDependencies must be included in the sum
+          # because typescript lives there and does appear in `bun pm ls`.
+          # jq is preinstalled on ubuntu-latest.
+          expected="$(jq -r '[(.dependencies//{}), (.devDependencies//{}), (.peerDependencies//{})] | map(keys) | add | unique | length' package.json)"
+          if ! printf '%s' "$expected" | grep -qE '^[0-9]+$' || [ "$expected" -lt 1 ]; then
+            echo "::error::Could not derive the direct-dependency count from package.json"
+            exit 1
+          fi
+          if [ "$count" -ne "$expected" ]; then
+            echo "::error::Dependency audit parsed $count package(s) from the image but package.json declares $expected direct dependenc(ies) — the audit is not covering the declared inventory"
             exit 1
           fi
           if ! printf '%s\n' "$deps" | grep -q '^@cerebras/cerebras_cloud_sdk@'; then
