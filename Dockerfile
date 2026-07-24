@@ -9,7 +9,14 @@
 # Pinning lets the image build on an arm64 host (Apple Silicon, via emulation) and
 # still produce a binary that runs on the mini-pc. On a native amd64 builder it is
 # a no-op.
-FROM --platform=linux/amd64 oven/bun:1.1.29 AS builder
+# Pinned to 1.3.11: Bun before v1.1.39 cannot read this repo's text `bun.lock`
+# format and silently resolves from the `^` ranges in package.json instead, so
+# `bun install --frozen-lockfile` below exits 0 having installed different
+# versions than the test suite covers. Matches `setup-bun` in
+# .github/workflows/ci.yml — the two must be bumped together. See
+# .planning/quick/260724-rp0-dockerfile-bun-1-3-11-job-de-build-de-im/ for the
+# empirical evidence.
+FROM --platform=linux/amd64 oven/bun:1.3.11 AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -53,7 +60,7 @@ RUN mkdir -p /models \
 # Stage 2: final — Bun proxy + whisper-server sidecar
 # ============================================================
 # Must match the builder arch (amd64) — the copied whisper-server binary is amd64.
-FROM --platform=linux/amd64 oven/bun:1.1.29
+FROM --platform=linux/amd64 oven/bun:1.3.11
 
 WORKDIR /app
 

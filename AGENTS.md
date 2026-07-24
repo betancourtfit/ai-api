@@ -1071,7 +1071,7 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 
 ## Runtime
 
-- Bun 1.1.29 (pinned in `Dockerfile`) — local dev uses Bun 1.3.11
+- Bun 1.3.11 (pinned in `Dockerfile`, both stages) — matches CI and local dev
 - ESNext target; module system: `"Preserve"` with bundler-mode resolution
 - Bun (`bun install`)
 - Lockfile: `bun.lock` present (lockfileVersion 1)
@@ -1108,13 +1108,13 @@ Personal middleware API that exposes a stable OpenAI-compatible endpoint (`/v1/c
 - Key env vars referenced in source: `HOSTNAME`, `PORT`
 - Key env vars required per `refactor.md` design spec: `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `PERSONAL_PROXY_API_KEY`, `PORT`, `HOSTNAME`, `LOG_LEVEL`, `REQUEST_TIMEOUT_MS`, `MAX_REQUEST_BODY_BYTES`, `CEREBRAS_BASE_URL`, `GROQ_BASE_URL`, `CEREBRAS_VERSION_PATCH`, `ROUTING_STRATEGY`, `PROVIDER_ORDER`, `DEFAULT_COOLDOWN_SECONDS`, `MAX_PROVIDER_ATTEMPTS_PER_REQUEST`, `MODEL_REGISTRY_JSON`, `EXPOSE_PROVIDER_HEADER`, `ENABLE_INTERNAL_STATUS_ENDPOINT`
 - No `tsconfig.build.json` or separate build config; Bun transpiles TypeScript natively at runtime
-- `Dockerfile` uses `oven/bun:1.1.29` base image
+- `Dockerfile` uses `oven/bun:1.3.11` base image
 
 ## Platform Requirements
 
-- Bun >= 1.1.29
+- Bun >= 1.3.11 (earlier versions cannot read the text `bun.lock` format)
 - No Node.js required
-- Docker container via `oven/bun:1.1.29`
+- Docker container via `oven/bun:1.3.11`
 - Port: `3001` (Dockerfile default); `3000` (code default); overridable via `PORT` env var
 - Hostname: `0.0.0.0` (all interfaces) or overridable via `HOSTNAME` env var
 - Deployment target: EasyPanel (mentioned in code comment) or any reverse-proxy-compatible host
