@@ -1,60 +1,57 @@
-// index.ts — Bun.serve() router with auth + validation + alias resolve + completion
-// Phase 3: createServer factory (D-02), X-Request-ID (OBS-01), structured logs (OBS-02..04), NORM-10, D-07
+// index.ts — Bun.serve() entrypoint and createServer factory.
+// Composition layer: assembles ports into use cases and delegates HTTP handling to adapters.
 import { config } from './config';
 import { openaiError, authNotConfiguredError } from './adapters/inbound/http/presenters/openai-error';
-import { geminiError } from './adapters/inbound/http/presenters/gemini-error';
 import { newRequestId, withRequestId as attachRequestId } from './adapters/inbound/http/middleware/request-id';
 import { extractBearerToken, verifyToken } from './adapters/inbound/http/middleware/bearer-auth';
+import { toSseStream, sseHeaders } from './adapters/inbound/http/presenters/sse';
 import { createConsoleLogger } from './adapters/outbound/console-logger';
+import { systemClock } from './adapters/outbound/system-clock';
+import { toUpstreamFailure } from './adapters/outbound/sdk-error-mapper';
 import { matchTranscriptions, handleTranscriptions } from './adapters/inbound/http/routes/transcriptions';
 import { matchGeminiGenerateContent, handleGeminiGenerateContent } from './adapters/inbound/http/routes/gemini-generate-content';
 import { transcribeAudio } from './application/use-cases/transcribe-audio';
+import { createChatCompletion } from './application/use-cases/create-chat-completion';
+import { streamChatCompletion } from './application/use-cases/stream-chat-completion';
+import type { ChatUseCaseDeps } from './application/use-cases/chat-deps';
 import type { RouteContext, ServerDeps } from './adapters/inbound/http/context';
+import type { ModelRegistry } from './domain/model-registry';
+import type { ProviderStateStore } from './application/ports/provider-state-store';
 import { isKnownAlias, resolveUpstreamModel, listAliases, rewriteUpstreamModelIds } from './model-registry';
-import { validateAudioFileSize, validateAudioTranscription } from './audio-schema';
 import { validateChatCompletion } from './request-schema';
-import { calcCooldownMs, classifyError, parseCerebrasHeaders, parseGroqHeaders } from './routing/cooldown-manager';
-import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure } from './routing/provider-state';
+import { advanceCursor, chooseEligibleProviders, getStateSnapshot, isEligible, setCooldown, setRateLimitSnapshot, recordSuccess, recordFailure, resetForTesting } from './routing/provider-state';
 import type { Provider } from './routing/provider-state';
 import { cerebrasAdapter } from './services/cerebras';
 import { groqAdapter } from './services/groq';
-import { normalizeChunk, normalizeResponse } from './response-normalizer';
 import { HttpWhisperService, NoopWhisperService } from './whisper-service';
 import type { WhisperService } from './whisper-service';
-import type { AudioTranscriptionResult, CompletionParams, ProviderAdapter, StreamChunk } from './types';
-import type { HeaderSource } from './routing/cooldown-manager';
+import type { CompletionParams, ProviderAdapter } from './types';
 
-// OBS-02: structured logger with LOG_LEVEL gating — now the Logger port adapter
+// OBS-02: structured logger with LOG_LEVEL gating — the Logger port adapter
 const logger = createConsoleLogger(config.logLevel);
-const log = (level: 'info' | 'warn' | 'error', data: Record<string, unknown>): void => {
-    logger.log(level, data);
+
+// The provider-state shim exposes free functions bound to one module-level store instance.
+// Wrap them as the ProviderStateStore port so the use cases see a port, not a module.
+// Plan 08-04 replaces this with composition/container.ts.
+const providerStore: ProviderStateStore = {
+    isEligible,
+    chooseEligibleProviders,
+    advanceCursor,
+    setCooldown,
+    setRateLimitSnapshot,
+    recordSuccess,
+    recordFailure,
+    getSnapshot: getStateSnapshot,
+    reset: resetForTesting,
 };
 
-function parseRateLimitHeaders(provider: Provider, headers: HeaderSource) {
-    return provider === 'cerebras'
-        ? parseCerebrasHeaders(headers)
-        : parseGroqHeaders(headers);
-}
+const modelRegistry: ModelRegistry = {
+    resolveUpstreamModel,
+    isKnownAlias,
+    listAliases,
+    rewriteUpstreamModelIds,
+};
 
-function toRateLimitSnapshot(parsed: Record<string, number | undefined>): Record<string, string> {
-    const snapshot: Record<string, string> = {};
-
-    for (const [key, value] of Object.entries(parsed)) {
-        if (value !== undefined) {
-            snapshot[key] = String(value);
-        }
-    }
-
-    return snapshot;
-}
-
-function hasVisibleChunkData(chunk: StreamChunk): boolean {
-    return chunk.choices.some((choice) => (
-        choice.finish_reason !== null
-        || choice.delta.role !== undefined
-        || choice.delta.content !== undefined
-    ));
-}
 
 // D-02: exported factory — importing index.ts does NOT bind a port
 export function createServer(
@@ -68,6 +65,20 @@ export function createServer(
         audioMaxFileBytes,
         transcribeAudio: transcribeAudio({ transcription: whisperService, logger }),
     };
+
+    // toFailure is injected so the application layer never imports the vendor-aware mapper.
+    const chatDeps: ChatUseCaseDeps = {
+        providers: adapters,
+        store: providerStore,
+        registry: modelRegistry,
+        logger,
+        clock: systemClock,
+        maxAttempts: config.maxProviderAttemptsPerRequest,
+        defaultCooldownSeconds: config.defaultCooldownSeconds,
+        toFailure: toUpstreamFailure,
+    };
+    const runCreateChatCompletion = createChatCompletion(chatDeps);
+    const runStreamChatCompletion = streamChatCompletion(chatDeps);
 
     return Bun.serve({
         hostname: config.hostname,
@@ -311,127 +322,30 @@ export function createServer(
                     seed: input.seed ?? null,
                 };
 
-                const candidates = chooseEligibleProviders(requestedModel);
-                // WR-02: do NOT advance cursor unconditionally here — cursor is advanced after
-                // each failed provider attempt so that on recovery the next request starts from
-                // the provider after the one that last failed, not from a stale pre-eligibility-check position.
-
-                if (candidates.length === 0) {
-                    log('info', {
-                        event: 'request_complete',
-                        requestId,
-                        timestamp: new Date(requestStart).toISOString(),
-                        route: `${request.method} ${pathname}`,
-                        logicalAlias: requestedModel,
-                        provider: null,
-                        upstreamModelId: null,
-                        attempt: 0,
-                        streaming: input.stream === true,
-                        statusCode: 503,
-                        latencyMs: Date.now() - requestStart,
-                        failoverReason: null,
-                        usage: null,
-                    });
-                    return withRequestId(openaiError(
-                        'No eligible provider available for the requested model.',
-                        'server_error',
-                        'no_provider_available',
-                        'model',
-                        503
-                    ));
-                }
+                const useCaseInput = {
+                    logicalAlias: requestedModel,
+                    params,
+                    requestId,
+                    route: `${request.method} ${pathname}`,
+                    requestStart,
+                };
 
                 if (input.stream === true) {
                     const controller = new AbortController();
                     request.signal.addEventListener('abort', () => controller.abort(), { once: true });
 
-                    let chosenProvider: Provider | null = null;
-                    let chosenUpstreamModelId: string | null = null;
-                    let sdkStream: AsyncIterable<import('./types').StreamChunk> | null = null;
-                    let attemptCount = 0;
-                    let failoverReason: string | null = null;
+                    const streamed = await runStreamChatCompletion(useCaseInput, controller.signal);
 
-                    for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                        const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
-                        if (!upstreamModelId) continue;
-                        const adapter = adapters[provider];
-                        attemptCount++;
-
-                        try {
-                            sdkStream = await adapter.stream(upstreamModelId, params, controller.signal);
-                            chosenProvider = provider;
-                            chosenUpstreamModelId = upstreamModelId;
-                            advanceCursor(); // WR-02: advance after successful selection for next request's round-robin
-                            break;
-                        } catch (err) {
-                            const classified = classifyError(err);
-                            recordFailure(provider, classified.status ?? 0);
-                            // WR-02: advance cursor after each failed attempt so the next request
-                            // does not restart from the same failing provider.
-                            advanceCursor();
-
-                            if (!classified.shouldFailover) {
-                                // D-07: pass upstream error message through with model-ID de-leaking
-                                return withRequestId(openaiError(
-                                    rewriteUpstreamModelIds(classified.message ?? 'Upstream provider rejected the request.'),
-                                    'invalid_request_error',
-                                    'upstream_error',
-                                    null,
-                                    classified.status ?? 502
-                                ));
-                            }
-
-                            if (classified.status === 429 || classified.status === 498) {
-                                // CR-02: always apply cooldown — use DEFAULT_COOLDOWN_SECONDS
-                                // when headers are absent (CLAUDE.md §13.3)
-                                const parsed = classified.headers
-                                    ? parseRateLimitHeaders(provider, classified.headers)
-                                    : {};
-                                const snapshot = classified.headers
-                                    ? toRateLimitSnapshot(parsed as Record<string, number | undefined>)
-                                    : {};
-                                const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
-                                const cooldownUntil = Date.now() + cooldownMs;
-
-                                setCooldown(provider, cooldownUntil,
-                                    Object.keys(snapshot).length > 0 ? snapshot : undefined);
-                                failoverReason = `status_${classified.status}`;
-                                log('warn', {
-                                    event: 'provider_cooldown',
-                                    requestId,
-                                    provider,
-                                    status: classified.status,
-                                    cooldownUntil: new Date(cooldownUntil).toISOString(),
-                                });
-                                continue;
-                            }
-
-                            failoverReason = `status_${classified.status ?? 'unknown'}`;
-                            log('warn', {
-                                event: 'provider_failover',
-                                requestId,
-                                provider,
-                                status: classified.status,
-                            });
+                    if (!streamed.ok) {
+                        if (streamed.kind === 'upstream_rejected') {
+                            return withRequestId(openaiError(
+                                streamed.message,
+                                'invalid_request_error',
+                                'upstream_error',
+                                null,
+                                streamed.status
+                            ));
                         }
-                    }
-
-                    if (!sdkStream || !chosenProvider || !chosenUpstreamModelId) {
-                        log('info', {
-                            event: 'request_complete',
-                            requestId,
-                            timestamp: new Date(requestStart).toISOString(),
-                            route: `${request.method} ${pathname}`,
-                            logicalAlias: requestedModel,
-                            provider: null,
-                            upstreamModelId: null,
-                            attempt: attemptCount,
-                            streaming: true,
-                            statusCode: 503,
-                            latencyMs: Date.now() - requestStart,
-                            failoverReason,
-                            usage: null,
-                        });
                         return withRequestId(openaiError(
                             'No eligible provider available for the requested model.',
                             'server_error',
@@ -443,246 +357,47 @@ export function createServer(
 
                     server.timeout(request, 0);
 
-                    // Capture for closure (TypeScript narrowing)
-                    const finalProvider = chosenProvider;
-                    const finalUpstreamModelId = chosenUpstreamModelId;
-                    const finalAttemptCount = attemptCount;
-                    const finalFailoverReason = failoverReason;
-
-                    const body = (async function* () {
-                        let firstChunkSent = false;
-                        let streamUsage: unknown = null;
-
-                        try {
-                            for await (const chunk of sdkStream) {
-                                // WR-02: capture usage from terminal chunk (choices:[], usage:{...})
-                                // before the hasVisibleChunkData check discards it.
-                                const rawChunk = chunk as Record<string, unknown>;
-                                if (rawChunk['usage'] &&
-                                        Array.isArray(rawChunk['choices']) &&
-                                        (rawChunk['choices'] as unknown[]).length === 0) {
-                                    streamUsage = rawChunk['usage'];
-                                    continue; // terminal usage chunk — not forwarded downstream
-                                }
-
-                                const normalized = normalizeChunk(chunk, requestedModel);
-                                if (!hasVisibleChunkData(normalized)) {
-                                    continue;
-                                }
-                                if (!firstChunkSent) {
-                                    // WR-01: record success only after first real data is received —
-                                    // adapter.stream() resolves without consuming bytes, so a
-                                    // stream-open failure would commit a false success record.
-                                    recordSuccess(finalProvider, 200);
-                                    firstChunkSent = true;
-                                }
-                                yield `data: ${JSON.stringify(normalized)}\n\n`;
-                            }
-
-                            // WR-01: if stream completed without any visible chunks, still mark success
-                            if (!firstChunkSent) {
-                                recordSuccess(finalProvider, 200);
-                            }
-
-                            yield 'data: [DONE]\n\n';
-
-                            // OBS-02: emit request-completion log after [DONE] — total stream duration
-                            log('info', {
-                                event: 'request_complete',
-                                requestId,
-                                timestamp: new Date(requestStart).toISOString(),
-                                route: `${request.method} ${pathname}`,
-                                logicalAlias: requestedModel,
-                                provider: finalProvider,
-                                upstreamModelId: finalUpstreamModelId,
-                                attempt: finalAttemptCount,
-                                streaming: true,
-                                statusCode: 200,
-                                latencyMs: Date.now() - requestStart,
-                                failoverReason: finalFailoverReason,
-                                usage: streamUsage,
-                            });
-                        } catch (err) {
-                            // CR-03: log and emit [DONE] unconditionally regardless of firstChunkSent.
-                            // When firstChunkSent=true, a mid-stream error must still close the SSE
-                            // stream gracefully so clients don't hang waiting for the sentinel.
-                            const classified = classifyError(err);
-                            log('warn', {
-                                event: firstChunkSent
-                                    ? 'stream_error_after_first_chunk'
-                                    : 'stream_error_before_first_chunk',
-                                requestId,
-                                provider: finalProvider,
-                                status: classified.status,
-                            });
-
-                            // OBS-02: emit request-complete log for all stream error paths
-                            log('info', {
-                                event: 'request_complete',
-                                requestId,
-                                timestamp: new Date(requestStart).toISOString(),
-                                route: `${request.method} ${pathname}`,
-                                logicalAlias: requestedModel,
-                                provider: finalProvider,
-                                upstreamModelId: finalUpstreamModelId,
-                                attempt: finalAttemptCount,
-                                streaming: true,
-                                statusCode: classified.status ?? 500,
-                                latencyMs: Date.now() - requestStart,
-                                failoverReason: finalFailoverReason,
-                                usage: streamUsage,
-                            });
-
-                            // Always emit [DONE] — SSE protocol requires the sentinel even on error
-                            yield 'data: [DONE]\n\n';
-                        }
-                    })();
-
-                    // OBS-01: X-Request-ID in streaming headers at construction time (not via wrapper)
-                    // OBS-05: X-LLM-Provider conditional on config.exposeProviderHeader
-                    const streamHeaders: Record<string, string> = {
-                        'Content-Type': 'text/event-stream',
-                        'Cache-Control': 'no-cache',
-                        'Connection': 'keep-alive',
-                        'X-Request-ID': requestId,
-                        ...(config.exposeProviderHeader ? { 'X-LLM-Provider': chosenProvider } : {}),
-                    };
-
-                    return new Response(body, {
+                    return new Response(toSseStream(streamed.chunks), {
                         status: 200,
-                        headers: streamHeaders,
+                        headers: sseHeaders({
+                            requestId,
+                            provider: streamed.provider,
+                            exposeProvider: config.exposeProviderHeader,
+                        }),
                     });
                 }
 
                 // Non-streaming path
-                let attempt = 0;
-                let failoverReason: string | null = null;
+                const completed = await runCreateChatCompletion(useCaseInput);
 
-                for (const provider of candidates.slice(0, config.maxProviderAttemptsPerRequest)) {
-                    const upstreamModelId = resolveUpstreamModel(requestedModel, provider);
-                    if (!upstreamModelId) continue;
-                    const adapter = adapters[provider];
-                    attempt++;
-
-                    try {
-                        const { result, headers } = await adapter.complete(upstreamModelId, params);
-                        const parsed = parseRateLimitHeaders(provider, headers);
-                        const snapshot = toRateLimitSnapshot(parsed as Record<string, number | undefined>);
-
-                        setRateLimitSnapshot(provider, snapshot);
-                        recordSuccess(provider, 200);
-                        advanceCursor(); // WR-02: advance after successful selection for next request's round-robin
-
-                        // D-08: warn when upstream omits usage
-                        if (result.usage === undefined) {
-                            log('warn', { event: 'usage_missing', provider, requestId });
-                        }
-
-                        const normalized = normalizeResponse(result, requestedModel);
-
-                        // OBS-02: request-completion log for non-streaming success
-                        log('info', {
-                            event: 'request_complete',
-                            requestId,
-                            timestamp: new Date(requestStart).toISOString(),
-                            route: `${request.method} ${pathname}`,
-                            logicalAlias: requestedModel,
-                            provider,
-                            upstreamModelId,
-                            attempt,
-                            streaming: false,
-                            statusCode: 200,
-                            latencyMs: Date.now() - requestStart,
-                            failoverReason,
-                            usage: normalized.usage,
-                        });
-
-                        // OBS-05: X-LLM-Provider conditional on config.exposeProviderHeader
-                        const responseHeaders: Record<string, string> = {
-                            'Content-Type': 'application/json',
-                            ...(config.exposeProviderHeader ? { 'X-LLM-Provider': provider } : {}),
-                        };
-
-                        return withRequestId(new Response(
-                            JSON.stringify(normalized),
-                            { status: 200, headers: responseHeaders }
+                if (!completed.ok) {
+                    if (completed.kind === 'upstream_rejected') {
+                        return withRequestId(openaiError(
+                            completed.message,
+                            'invalid_request_error',
+                            'upstream_error',
+                            null,
+                            completed.status
                         ));
-                    } catch (err) {
-                        const classified = classifyError(err);
-                        recordFailure(provider, classified.status ?? 0);
-                        // WR-02: advance cursor after each failed attempt so the next request
-                        // does not restart from the same failing provider.
-                        advanceCursor();
-
-                        if (!classified.shouldFailover) {
-                            // D-07: pass upstream error message through with model-ID de-leaking
-                            return withRequestId(openaiError(
-                                rewriteUpstreamModelIds(classified.message ?? 'Upstream provider rejected the request.'),
-                                'invalid_request_error',
-                                'upstream_error',
-                                null,
-                                classified.status ?? 502
-                            ));
-                        }
-
-                        if (classified.status === 429 || classified.status === 498) {
-                            // CR-02: always apply cooldown — use DEFAULT_COOLDOWN_SECONDS
-                            // when headers are absent (CLAUDE.md §13.3)
-                            const parsed = classified.headers
-                                ? parseRateLimitHeaders(provider, classified.headers)
-                                : {};
-                            const snapshot = classified.headers
-                                ? toRateLimitSnapshot(parsed as Record<string, number | undefined>)
-                                : {};
-                            const cooldownMs = calcCooldownMs(parsed, config.defaultCooldownSeconds);
-                            const cooldownUntil = Date.now() + cooldownMs;
-
-                            setCooldown(provider, cooldownUntil,
-                                Object.keys(snapshot).length > 0 ? snapshot : undefined);
-                            failoverReason = `status_${classified.status}`;
-                            log('warn', {
-                                event: 'provider_cooldown',
-                                requestId,
-                                provider,
-                                status: classified.status,
-                                cooldownUntil: new Date(cooldownUntil).toISOString(),
-                            });
-                            continue;
-                        }
-
-                        failoverReason = `status_${classified.status ?? 'unknown'}`;
-                        log('warn', {
-                            event: 'provider_failover',
-                            requestId,
-                            provider,
-                            status: classified.status,
-                        });
                     }
+                    return withRequestId(openaiError(
+                        'No eligible provider available for the requested model.',
+                        'server_error',
+                        'no_provider_available',
+                        'model',
+                        503
+                    ));
                 }
 
-                // OBS-02: request-completion log for exhaustion path
-                log('info', {
-                    event: 'request_complete',
-                    requestId,
-                    timestamp: new Date(requestStart).toISOString(),
-                    route: `${request.method} ${pathname}`,
-                    logicalAlias: requestedModel,
-                    provider: null,
-                    upstreamModelId: null,
-                    attempt,
-                    streaming: false,
-                    statusCode: 503,
-                    latencyMs: Date.now() - requestStart,
-                    failoverReason,
-                    usage: null,
-                });
+                // OBS-05: X-LLM-Provider conditional on config.exposeProviderHeader
+                const responseHeaders: Record<string, string> = {
+                    'Content-Type': 'application/json',
+                    ...(config.exposeProviderHeader ? { 'X-LLM-Provider': completed.provider } : {}),
+                };
 
-                return withRequestId(openaiError(
-                    'No eligible provider available for the requested model.',
-                    'server_error',
-                    'no_provider_available',
-                    'model',
-                    503
+                return withRequestId(new Response(
+                    JSON.stringify(completed.response),
+                    { status: 200, headers: responseHeaders }
                 ));
             }
 
