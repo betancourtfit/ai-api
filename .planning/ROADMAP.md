@@ -180,7 +180,7 @@ Plans:
 
 **Requirements:** HEX-01, HEX-02, HEX-03, HEX-04, HEX-05, HEX-06, HEX-07, HEX-08, HEX-09, HEX-10, HEX-11, HEX-12, HEX-13, HEX-14, HEX-15
 **Depends on:** Phase 7
-**Plans:** 2/4 plans executed
+**Plans:** 3/4 plans executed
 
 Scope:
 
@@ -211,7 +211,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 08-03-PLAN.md — Application use cases + thin HTTP delivery (ordered router, middleware, presenters); `index.ts` god file dissolved (HEX-09..11)
+- [x] 08-03-PLAN.md — Application use cases + thin HTTP delivery (ordered router, middleware, presenters); `index.ts` god file dissolved (HEX-09..11)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -237,7 +237,7 @@ Cross-cutting constraints:
 | 6. Whisper Sidecar + Models + Ready | 3/3 | Complete    | 2026-06-06 |
 | 7. Gemini-Compatible Transcription Shim | 1/1 | Complete   | 2026-06-17 |
 
-| 8. Hexagonal Architecture Audit + Refactor | 2/4 | In Progress|  |
+| 8. Hexagonal Architecture Audit + Refactor | 3/4 | In Progress|  |
 
 ---
 

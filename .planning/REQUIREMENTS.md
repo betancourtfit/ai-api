@@ -160,8 +160,8 @@ Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no 
 
 ### Composition & State
 
-- [ ] **HEX-12**: Provider state is an injected store instance — no module-level mutable singleton and no test-only reset function exported from production code
-- [ ] **HEX-13**: A single composition root builds and injects every adapter; importing any domain, application, or adapter module performs no env read, no JSON parse, and constructs no SDK client
+- [x] **HEX-12**: Provider state is an injected store instance — no module-level mutable singleton and no test-only reset function exported from production code
+- [x] **HEX-13**: A single composition root builds and injects every adapter; importing any domain, application, or adapter module performs no env read, no JSON parse, and constructs no SDK client
 
 ### Regression & Enforcement
 
