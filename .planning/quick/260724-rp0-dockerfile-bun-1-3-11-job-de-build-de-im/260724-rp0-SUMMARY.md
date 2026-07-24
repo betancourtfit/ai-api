@@ -123,7 +123,7 @@ The executor stopped at the blocking checkpoint without writing this SUMMARY, so
 ## Required Follow-ups
 
 1. **GHCR + EasyPanel deploy webhook — the next step.** The image now builds and is audited in CI, but it is thrown away (`push: false`). Publishing it to GHCR tagged by SHA, having EasyPanel pull the image instead of building from git, and adding a post-deploy smoke against `/health` (which already returns `ok <sha>` via `BUILD_VERSION`) is what actually gets the whisper.cpp compile off the mini PC and makes rollback a retag instead of a 15-minute rebuild.
-2. **GHA cache effectiveness is unproven across runs.** `cache-from`/`cache-to: type=gha` are wired, but the first run had nothing to hit. The docs commit for this task is the second build — compare its `docker-image` duration against the 239s baseline.
+2. **GHA cache effectiveness — MEASURED, it works.** Run `30133260678` (the docs commit, `63fba76`) finished `docker-image` in **100s** against the 239s cold baseline: a 2.4x speedup, with the whisper.cpp compile and the 466 MB model download both served from cache. It does not drop to near-zero because `CACHEBUST=${{ github.sha }}` deliberately invalidates every layer below it on each commit, and `load: true` plus the `docker run` audit cost real seconds regardless. 100s per push to master is the steady-state cost of this job.
 3. **`.planning/**` still contains 1.1.29 references** (including `.planning/codebase/*.md`). Left untouched on purpose as a historical record of what was true when those documents were written.
 4. **The whisper model is still baked into the image** (~466 MB). Moving it to a volume would cut the image to roughly its base size and make pulls on the mini PC far cheaper. Unstarted.
 
