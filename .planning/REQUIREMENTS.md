@@ -143,14 +143,14 @@ Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no 
 
 ### Domain Purity
 
-- [ ] **HEX-04**: `domain/` imports nothing outside `domain/` — no npm SDK, no `zod`, no `Bun.*`, no `Request`/`Response`/`Headers`, no `process.env`, no `config`
-- [ ] **HEX-05**: Upstream failure classification operates on a provider-agnostic failure shape, not vendor `APIError` classes
-- [ ] **HEX-06**: Rate-limit header parsing consumes a plain `Record<string, string>` map, not a WHATWG `Headers` instance
+- [x] **HEX-04**: `domain/` imports nothing outside `domain/` — no npm SDK, no `zod`, no `Bun.*`, no `Request`/`Response`/`Headers`, no `process.env`, no `config`
+- [x] **HEX-05**: Upstream failure classification operates on a provider-agnostic failure shape, not vendor `APIError` classes
+- [x] **HEX-06**: Rate-limit header parsing consumes a plain `Record<string, string>` map, not a WHATWG `Headers` instance
 
 ### Ports
 
-- [ ] **HEX-07**: Every outbound dependency (chat provider, transcription, provider-state store, clock, logger) is declared as an interface owned by the application layer, in a file separate from any implementation
-- [ ] **HEX-08**: No port signature references a vendor SDK type or an HTTP transport type
+- [x] **HEX-07**: Every outbound dependency (chat provider, transcription, provider-state store, clock, logger) is declared as an interface owned by the application layer, in a file separate from any implementation
+- [x] **HEX-08**: No port signature references a vendor SDK type or an HTTP transport type
 
 ### Application
 
@@ -165,8 +165,8 @@ Derived during planning (`/gsd-plan-phase 8`). Pure structural requirements: no 
 
 ### Regression & Enforcement
 
-- [ ] **HEX-14**: The full `bun test` suite is green (≥ 111 tests, 0 fail) after every plan; public wire contract unchanged — same paths, methods, status codes, headers, JSON shapes, SSE framing; zero new npm packages
-- [ ] **HEX-15**: An automated boundary-guard test fails when a forbidden cross-layer import is introduced
+- [x] **HEX-14**: The full `bun test` suite is green (≥ 111 tests, 0 fail) after every plan; public wire contract unchanged — same paths, methods, status codes, headers, JSON shapes, SSE framing; zero new npm packages
+- [x] **HEX-15**: An automated boundary-guard test fails when a forbidden cross-layer import is introduced
 
 ---
 
