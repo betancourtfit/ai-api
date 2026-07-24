@@ -34,7 +34,7 @@ jobs:
 
       # .env.test is the one tracked env file and is deliberately allowlisted:
       # Bun auto-loads it under `bun test`, giving CI deterministic config with
-      # no repo secrets. Its contents were human-verified (Task 3 of the quick
+      # no repo secret values. Its contents were human-verified (Task 3 of the quick
       # task that introduced this workflow) to hold fixtures only, never live keys.
       - name: Guard - no secret env files tracked
         run: |
@@ -237,3 +237,161 @@ jobs:
           fi
 
           echo "Success: all $count image dependencies match bun.lock."
+
+      # The only step here that can hang: without a timeout a wedged container
+      # burns runner minutes until the 6-hour job default. This step starts the
+      # production image under its REAL entrypoint (start.sh) for the first
+      # time ever in CI — the existing step above deliberately overrides the
+      # entrypoint precisely so start.sh does not launch.
+      - name: Smoke - run the real container
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+
+          # Literal dummy values only — this smoke never makes a real upstream
+          # call, so a real key must never be used here.
+          #
+          # PERSONAL_PROXY_API_KEY is needed twice: the Bearer gate on
+          # /v1/audio/transcriptions (a POST_AUTH_ROUTES entry) and
+          # proxyKeyConfigured inside getReadiness — without it /ready is
+          # {ready:false, mode:"not_configured"} and returns 503.
+          #
+          # CEREBRAS_API_KEY / GROQ_API_KEY: only their *presence* matters
+          # (buildContainer passes Boolean(cfg.cerebrasApiKey) into the store's
+          # configured map). Without them eligibleProviders is empty and
+          # /ready is 503.
+          #
+          # WHISPER_MODEL_ALIAS: buildContainer picks HttpWhisperService only
+          # when this is non-null, and handleTranscriptions 400s unless the
+          # request's model field equals it exactly.
+          #
+          # WHISPER_TIMEOUT_MS: the default is 30000ms and an ~11s clip on a
+          # 2-vCPU runner with a GGML_NATIVE=OFF build of ggml-small.bin can
+          # exceed it, turning a healthy container into a 503.
+          #
+          # Do NOT pass -e HOSTNAME. Docker sets HOSTNAME to the container ID
+          # and config.hostname reads it, so the app binds the container's own
+          # IP — which is exactly what production does today. Overriding it
+          # would mask production behaviour.
+          docker run -d --name smoke -p 3001:3001 \
+            -e PERSONAL_PROXY_API_KEY=ci-smoke-not-a-real-key \
+            -e CEREBRAS_API_KEY=ci-dummy-cerebras \
+            -e GROQ_API_KEY=ci-dummy-groq \
+            -e WHISPER_MODEL_ALIAS=whisper-1 \
+            -e WHISPER_TIMEOUT_MS=180000 \
+            bun-ai-api:ci
+
+          # Wait for liveness via retries, never a fixed sleep. On each
+          # iteration, assert the container is still alive first — the braces
+          # below carry no leading $, so GitHub Actions does not treat them as
+          # an expression, and the `|| echo false` stops a removed container
+          # from aborting the step under set -e. A dead container fails fast
+          # here instead of polling a port that will never open until the
+          # step timeout.
+          up=0
+          for i in $(seq 1 60); do
+            running="$(docker inspect -f '{{.State.Running}}' smoke 2>/dev/null || echo false)"
+            if [ "$running" != "true" ]; then
+              echo "::error::container exited during startup"
+              exit 1
+            fi
+            if curl -fsS -m 2 http://127.0.0.1:3001/health >/dev/null 2>&1; then
+              up=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "::error::/health never answered within 60s"
+            exit 1
+          fi
+
+          # Assert the build stamp. This is the assertion closing the
+          # build-args CACHEBUST -> ARG CACHEBUST -> ENV BUILD_VERSION ->
+          # handleHealth chain, which has been fed by the build for two runs
+          # with nothing ever verifying it reaches runtime. GITHUB_SHA is the
+          # runner's own environment variable, not a ${{ }} interpolation.
+          health="$(curl -fsS -m 5 http://127.0.0.1:3001/health)"
+          expected_health="ok ${GITHUB_SHA}"
+          if [ "$health" != "$expected_health" ]; then
+            echo "::error::/health returned '$health', expected '$expected_health'"
+            exit 1
+          fi
+          echo "OK: /health == $expected_health"
+
+          # Assert readiness. Both dummy provider keys are present, so a
+          # "degraded" result means the store's configured map did not see
+          # them. whisperAvailable is captured but never gated on here —
+          # whisper.cpp's own GET /health may 404 on the pinned v1.7.6 build,
+          # and the 466 MB model may still be loading at this point.
+          ready_body="$(curl -fsS -m 10 http://127.0.0.1:3001/ready)"
+          echo "$ready_body"
+          echo "$ready_body" | jq -e '.ready == true' >/dev/null
+          echo "$ready_body" | jq -e '.mode == "ok"' >/dev/null
+          whisper_available="$(printf '%s' "$ready_body" | jq -r '.whisperAvailable')"
+
+          # Transcribe for real. whisper-models/sample.wav comes from the
+          # runner's actions/checkout (tracked, 352KB, RIFF WAVE 16-bit mono
+          # 16kHz), so nothing needs to be copied into the container and the
+          # ffmpeg --convert path is not involved. The `|| echo 000` on the
+          # curl call is required: under set -e a connection error would
+          # otherwise abort the step instead of retrying.
+          code=""
+          attempt=0
+          while [ "$attempt" -lt 24 ]; do
+            attempt=$((attempt + 1))
+            code="$(curl -s -o "$RUNNER_TEMP/smoke-transcription.json" -w '%{http_code}' -m 240 \
+              -X POST http://127.0.0.1:3001/v1/audio/transcriptions \
+              -H "Authorization: Bearer ci-smoke-not-a-real-key" \
+              -F "file=@whisper-models/sample.wav" \
+              -F "model=whisper-1" || echo 000)"
+            if [ "$code" = "200" ]; then
+              break
+            fi
+            # 503 (whisper still loading — HttpWhisperService.transcribe fails
+            # fast on connection refused) and 000 (curl-level failure) retry.
+            # Every other code is terminal.
+            if [ "$code" = "503" ] || [ "$code" = "000" ]; then
+              sleep 5
+              continue
+            fi
+            echo "::error::transcription request returned terminal status $code"
+            cat "$RUNNER_TEMP/smoke-transcription.json" || true
+            exit 1
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::transcription never returned 200 after 24 attempts"
+            exit 1
+          fi
+
+          # Assert the transcript exists, not what it says — this is the only
+          # assertion that proves whisper-server survived start.sh's
+          # background &. /health returns ok <sha> unconditionally and never
+          # touches whisper, so a /health-only smoke is a structural false
+          # green. Content is deliberately not asserted because the sample is
+          # English while the production default is WHISPER_LANGUAGE=es.
+          jq -e '(.text | type == "string") and ((.text | length) > 0)' "$RUNNER_TEMP/smoke-transcription.json" >/dev/null
+          excerpt="$(jq -r '.text' "$RUNNER_TEMP/smoke-transcription.json" | cut -c1-200)"
+          echo "Transcript excerpt: $excerpt"
+
+          # A free diagnostic, never a failure, about whether /ready's whisper
+          # field can be trusted.
+          if [ "$whisper_available" != "true" ]; then
+            echo "::warning::/ready reported whisperAvailable=false while a real transcription succeeded — HttpWhisperService.health() probes GET /health on whisper-server and that endpoint may not exist on the pinned v1.7.6 build"
+          fi
+
+      # Must sit after the smoke step and before cleanup, otherwise the
+      # container is already gone when it runs. if: failure() rather than
+      # always() keeps green runs quiet. Safe to print: the app's structured
+      # logger emits metadata only, never keys, prompts, responses, or
+      # transcripts (CLAUDE.md #19), and every credential in this container is
+      # a dummy anyway.
+      - name: Smoke - container logs on failure
+        if: failure()
+        run: docker logs smoke || true
+
+      # Always runs so a failed smoke never leaks a running container into a
+      # subsequent step or a self-hosted runner.
+      - name: Smoke - remove container
+        if: always()
+        run: docker rm -f smoke || true
