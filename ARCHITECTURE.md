@@ -97,16 +97,19 @@ Each `ChatProviderPort` implementation catches its own SDK error and surfaces an
 
 ## 6. Enforcement
 
-`tests/architecture/boundaries.test.ts` is the executable form of this document. It walks `domain/` and `application/` with `Bun.Glob`, extracts every `import … from '<spec>'`, and asserts the specifier is permitted for that file's layer. **Adding a forbidden import fails `bun test`** — this is a gate, not a lint suggestion.
+`tests/architecture/boundaries.test.ts` is the executable form of this document. It walks the layer directories with `Bun.Glob` and asserts five rule families. **Violating any of them fails `bun test`** — these are gates, not lint suggestions. Every glob also asserts a non-zero file count, so renaming a directory cannot silently disable a rule.
 
-Forbidden specifier substrings the guard checks:
+| # | Rule | Scope | What it rejects |
+|---|---|---|---|
+| 1 | **Layer imports** | `domain/`, `application/` | Any import specifier that resolves outside the layer's allowlist — bare npm specifiers anywhere, `../adapters`, `../config`, and (for `domain/`) `../application` |
+| 2 | **Forbidden constructs** | `domain/`, `application/` | `groq-sdk`, `@cerebras/`, `from 'zod'`, `process.env`, `Bun.*`, and the `Headers` / `Request` / `Response` / `FormData` types. `application/use-cases/` additionally rejects `text/event-stream`, SSE `data:` framing, the `[DONE]` sentinel, and `Bun.serve` |
+| 3 | **No stray env reads** | `domain/`, `application/`, `adapters/`, `composition/` | Any `process.env` read. `config.ts` is the single configuration ingress; the one allowed exception is `adapters/inbound/http/routes/health.ts` reading `BUILD_VERSION`, which is a build stamp, not configuration |
+| 4 | **No import-time construction** | `domain/`, `application/`, `adapters/` | A top-level (column-0) `new Cerebras(`, `new Groq(`, `new HttpWhisperService(`, `JSON.parse(`, or `createProviderStateStore(`. Wiring belongs inside a function body — importing a layer module must construct nothing |
+| 5 | **No shims** | `domain/`, `application/`, `adapters/`, `composition/` | A module whose entire body is re-export lines. `index.ts` is the documented exception: its `export { createServer }` is the public entry point |
 
-| Scope | Rejected substrings |
-|---|---|
-| `domain/` and `application/` | `groq-sdk`, `@cerebras/`, `'zod'`, `process.env`, `Bun.`, `../config`, `./config`, `adapters/` |
-| `domain/` additionally | `application/` |
+Rules 3-5 exist because the composition rules are as load-bearing as the import rules: an import-time SDK client, a stray `process.env` read, or a convenience shim would each quietly undo this document.
 
-If a rule in this document changes, change the guard in the same commit. A guard that silently stops matching is worse than no guard.
+If a rule here changes, change the guard in the same commit. A guard that silently stops matching is worse than no guard.
 
 ---
 

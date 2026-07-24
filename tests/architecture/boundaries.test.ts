@@ -166,6 +166,99 @@ describe('architecture boundaries', () => {
         expect(violations).toEqual([]);
     });
 
+    // Plan 08-04 (HEX-13): config.ts is the single ingress for process.env. The one documented
+    // exception is routes/health.ts reading BUILD_VERSION, which is a build stamp, not config.
+    test('no stray process.env reads outside config.ts', async () => {
+        const files = [
+            ...await collect('domain/**/*.ts'),
+            ...await collect('application/**/*.ts'),
+            ...await collect('adapters/**/*.ts'),
+            ...await collect('composition/**/*.ts'),
+        ];
+        expect(files.length).toBeGreaterThan(0);
+
+        const ALLOWED = new Set(['adapters/inbound/http/routes/health.ts']);
+        const violations: string[] = [];
+
+        for (const file of files) {
+            if (ALLOWED.has(file)) continue;
+            const source = await Bun.file(`${REPO_ROOT}${file}`).text();
+            if (/process\.env/.test(source)) {
+                violations.push(`${file}: reads process.env (only config.ts may)`);
+            }
+        }
+
+        expect(violations).toEqual([]);
+    });
+
+    // Plan 08-04 (HEX-13): importing a layer module must construct nothing. Wiring happens only
+    // inside a function body — i.e. on an indented line, never at column 0.
+    test('no import-time construction in domain/, application/, or adapters/', async () => {
+        const files = [
+            ...await collect('domain/**/*.ts'),
+            ...await collect('application/**/*.ts'),
+            ...await collect('adapters/**/*.ts'),
+        ];
+        expect(files.length).toBeGreaterThan(0);
+
+        const CONSTRUCTS = [
+            'new Cerebras(',
+            'new Groq(',
+            'new HttpWhisperService(',
+            'JSON.parse(',
+            'createProviderStateStore(',
+        ];
+        const violations: string[] = [];
+
+        for (const file of files) {
+            const source = await Bun.file(`${REPO_ROOT}${file}`).text();
+            const lines = source.split('\n');
+            for (const [i, line] of lines.entries()) {
+                // Top-level statement = first character is not whitespace.
+                if (/^\s/.test(line) || line.length === 0) continue;
+                for (const construct of CONSTRUCTS) {
+                    if (!line.includes(construct)) continue;
+                    // A declaration is not a call: `export function createProviderStateStore(...)`
+                    // defines the factory, it does not invoke it at import time.
+                    if (line.includes(`function ${construct}`)) continue;
+                    violations.push(`${file}:${i + 1}: top-level '${construct}'`);
+                }
+            }
+        }
+
+        expect(violations).toEqual([]);
+    });
+
+    // Plan 08-04 (HEX-13): the compatibility shims are gone and must not come back. A production
+    // module whose entire body is re-export lines is a shim. index.ts is the documented exception —
+    // its `export { createServer }` is the public entry point.
+    test('no compatibility shims in the production tree', async () => {
+        const files = [
+            ...await collect('domain/**/*.ts'),
+            ...await collect('application/**/*.ts'),
+            ...await collect('adapters/**/*.ts'),
+            ...await collect('composition/**/*.ts'),
+        ];
+        expect(files.length).toBeGreaterThan(0);
+
+        const violations: string[] = [];
+
+        for (const file of files) {
+            const source = await Bun.file(`${REPO_ROOT}${file}`).text();
+            const code = source
+                .split('\n')
+                .map((l) => l.trim())
+                .filter((l) => l.length > 0 && !l.startsWith('//') && !l.startsWith('*') && !l.startsWith('/*'));
+            if (code.length === 0) continue;
+            const allReExports = code.every((l) => /^export\s+(\*|type\s*\{|\{)/.test(l) && / from ['"]/.test(l));
+            if (allReExports) {
+                violations.push(`${file}: is a pure re-export shim`);
+            }
+        }
+
+        expect(violations).toEqual([]);
+    });
+
     test('adapters/ and config are never reachable from the inner layers', async () => {
         const files = [...await collect('domain/**/*.ts'), ...await collect('application/**/*.ts')];
         expect(files.length).toBeGreaterThan(0);
