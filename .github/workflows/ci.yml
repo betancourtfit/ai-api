@@ -12,7 +12,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Bun 1.1.29 (the Dockerfile's pin) predates the text `bun.lock` format
       # (introduced in Bun v1.1.39, default in v1.2) and cannot read this repo's
