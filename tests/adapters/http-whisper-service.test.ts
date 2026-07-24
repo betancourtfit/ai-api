@@ -1,6 +1,6 @@
-// tests/services/http-whisper-service.test.ts — HttpWhisperService against in-process fake sidecar
+// tests/adapters/http-whisper-service.test.ts — HttpWhisperService against in-process fake sidecar
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { HttpWhisperService } from '../../whisper-service';
+import { HttpWhisperService } from '../../adapters/outbound/http-whisper';
 
 let sidecar: ReturnType<typeof Bun.serve>;
 let sawModelField = false;

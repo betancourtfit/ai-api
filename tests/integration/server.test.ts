@@ -7,14 +7,28 @@ import { APIError as CerebrasAPIError } from '@cerebras/cerebras_cloud_sdk';
 import { APIError as GroqAPIError } from 'groq-sdk';
 import { createServer } from '../../index';
 import { config } from '../../config';
-import { resetForTesting } from '../../routing/provider-state';
-import type { AudioTranscriptionResult } from '../../types';
-import type { WhisperService } from '../../whisper-service';
+import { createProviderStateStore } from '../../domain/provider-state';
+import { createModelRegistry } from '../../domain/model-registry';
+import type { AudioTranscriptionResult } from '../../domain/types';
+import type { TranscriptionPort as WhisperService } from '../../application/ports/transcription';
 import { makeMockAdapter, resetMockAdapter } from './mock-adapters';
 import type { MockAdapter } from './mock-adapters';
 
 // Read proxy key from .env.test (loaded by bun test) — never hardcode
 const PROXY_KEY = process.env['PERSONAL_PROXY_API_KEY']!;
+
+// The provider-state store under test. Constructed here and injected into every server below
+// via createServer's `deps` parameter, so all three servers share one instance and beforeEach
+// can reset exactly the state the requests mutate (replaces the old resetForTesting() hatch).
+const registry = createModelRegistry({
+    'gpt-oss-120b-balanced': { cerebras: 'gpt-oss-120b', groq: 'openai/gpt-oss-120b' },
+});
+const store = createProviderStateStore({
+    order: ['cerebras', 'groq'],
+    clock: { now: () => Date.now() },
+    configured: { cerebras: true, groq: true },
+    resolveUpstreamModel: registry.resolveUpstreamModel,
+});
 
 type MockWhisperService = WhisperService & {
     transcribeMock: ReturnType<typeof mock>;
@@ -46,10 +60,10 @@ beforeAll(() => {
     mockGroq = makeMockAdapter('groq');
     mockWhisper = makeMockWhisperService();
     // port 0 = OS-assigned free port; read back via server.port
-    server = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0);
-    audioServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper);
+    server = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, undefined, undefined, { store });
+    audioServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper, undefined, { store });
     // TEST2-04: inject 100-byte file limit without lowering global transport ceiling
-    tinyServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper, 100);
+    tinyServer = createServer({ cerebras: mockCerebras, groq: mockGroq }, 0, mockWhisper, 100, { store });
 });
 
 afterAll(() => {
@@ -60,7 +74,7 @@ afterAll(() => {
 
 beforeEach(() => {
     // TEST-12: state isolation — reset routing cursor and cooldowns
-    resetForTesting();
+    store.reset();
     // Restore default mock implementations after TEST-05's persistent overrides
     resetMockAdapter(mockCerebras);
     resetMockAdapter(mockGroq);
@@ -504,7 +518,7 @@ describe('Integration: optional model with DEFAULT_MODEL_ALIAS fallback', () => 
     });
 
     beforeEach(() => {
-        resetForTesting();
+        store.reset();
         resetMockAdapter(defaultCerebras);
         resetMockAdapter(defaultGroq);
     });

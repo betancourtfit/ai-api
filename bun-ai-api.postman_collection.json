@@ -1,0 +1,217 @@
+{
+	"info": {
+		"_postman_id": "b8f2a1d4-7c3e-4a91-9e6b-1f0a2c5d3e84",
+		"name": "bun-ai-api — OpenAI/Gemini Proxy",
+		"description": "OpenAI-compatible proxy for Cerebras + Groq, plus a Gemini-compatible audio transcription shim.\n\n## Setup\nSet collection variables:\n- `base_url` — proxy base URL (default `http://localhost:3000`)\n- `proxy_key` — value of `PERSONAL_PROXY_API_KEY` (downstream Bearer / Gemini key)\n- `chat_model` — logical chat alias (default `gpt-oss-120b-balanced`)\n- `whisper_model` — whisper logical alias for `/v1/audio/transcriptions`\n- `gemini_model` — model segment for the Gemini route (default `gemini-1.5-pro-002`)\n- `audio_base64` — base64-encoded audio for the Gemini inline_data test\n\nOpenAI `/v1/*` routes use `Authorization: Bearer {{proxy_key}}`.\nThe Gemini `/v1beta/...:generateContent` route uses `?key=` or `x-goog-api-key` — NOT Bearer.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:3000", "type": "string" },
+		{ "key": "proxy_key", "value": "", "type": "string" },
+		{ "key": "chat_model", "value": "gpt-oss-120b-balanced", "type": "string" },
+		{ "key": "whisper_model", "value": "whisper-large-v3", "type": "string" },
+		{ "key": "gemini_model", "value": "gemini-1.5-pro-002", "type": "string" },
+		{ "key": "audio_base64", "value": "", "type": "string" }
+	],
+	"item": [
+		{
+			"name": "Health & Readiness",
+			"item": [
+				{
+					"name": "GET /health",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": ["{{base_url}}"],
+							"path": ["health"]
+						},
+						"description": "Liveness check. No auth. Returns ok when the server is up."
+					},
+					"response": []
+				},
+				{
+					"name": "GET /ready",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/ready",
+							"host": ["{{base_url}}"],
+							"path": ["ready"]
+						},
+						"description": "Readiness check. No auth. Returns ready (possibly degraded mode) when proxy key + at least one provider are configured."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Models",
+			"item": [
+				{
+					"name": "GET /v1/models",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{proxy_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/v1/models",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "models"]
+						},
+						"description": "Lists stable logical proxy model aliases (not raw provider model IDs). Bearer auth."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Chat",
+			"item": [
+				{
+					"name": "POST /v1/chat/completions (non-streaming)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{proxy_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"model\": \"{{chat_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Explain the value of low-latency inference in one paragraph.\" }\n  ],\n  \"max_completion_tokens\": 300\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/chat/completions",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "chat", "completions"]
+						},
+						"description": "OpenAI-compatible chat completion. Routed round-robin across Cerebras/Groq. Bearer auth."
+					},
+					"response": []
+				},
+				{
+					"name": "POST /v1/chat/completions (streaming)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{proxy_key}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"model\": \"{{chat_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Write three concise product ideas.\" }\n  ],\n  \"stream\": true,\n  \"max_completion_tokens\": 300\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/chat/completions",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "chat", "completions"]
+						},
+						"description": "Streaming chat completion (SSE). Response is text/event-stream ending with data: [DONE]."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Audio (OpenAI)",
+			"item": [
+				{
+					"name": "POST /v1/audio/transcriptions",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{proxy_key}}" }
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "type": "file", "src": [] },
+								{ "key": "model", "value": "{{whisper_model}}", "type": "text" }
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/v1/audio/transcriptions",
+							"host": ["{{base_url}}"],
+							"path": ["v1", "audio", "transcriptions"]
+						},
+						"description": "OpenAI-compatible Whisper transcription. multipart/form-data: attach an audio file in `file`, set `model` to the whisper alias. Bearer auth. (Select an audio file in the form-data `file` row before sending.)"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Gemini (transcription shim)",
+			"item": [
+				{
+					"name": "POST :generateContent (?key= auth)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        { \"text\": \"Transcribe this audio.\" },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"audio/mpeg\",\n            \"data\": \"{{audio_base64}}\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1beta/models/{{gemini_model}}:generateContent?key={{proxy_key}}",
+							"host": ["{{base_url}}"],
+							"path": ["v1beta", "models", "{{gemini_model}}:generateContent"],
+							"query": [
+								{ "key": "key", "value": "{{proxy_key}}" }
+							]
+						},
+						"description": "Gemini-wire-compatible audio transcription. Auth via ?key= query param. inline_data.data must be base64 audio. Returns candidates[0].content.parts[0].text + usageMetadata + modelVersion."
+					},
+					"response": []
+				},
+				{
+					"name": "POST :generateContent (x-goog-api-key auth)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json" },
+							{ "key": "x-goog-api-key", "value": "{{proxy_key}}" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"contents\": [\n    {\n      \"parts\": [\n        { \"text\": \"Transcribe this audio.\" },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"audio/mpeg\",\n            \"data\": \"{{audio_base64}}\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/v1beta/models/{{gemini_model}}:generateContent",
+							"host": ["{{base_url}}"],
+							"path": ["v1beta", "models", "{{gemini_model}}:generateContent"]
+						},
+						"description": "Same Gemini route, authenticating via the x-goog-api-key header instead of ?key=. No Bearer."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Diagnostics",
+			"item": [
+				{
+					"name": "GET /internal/providers/status",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{proxy_key}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/internal/providers/status",
+							"host": ["{{base_url}}"],
+							"path": ["internal", "providers", "status"]
+						},
+						"description": "Protected provider diagnostics (enabled when ENABLE_INTERNAL_STATUS_ENDPOINT=true). Bearer auth. Never exposes secret values."
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}

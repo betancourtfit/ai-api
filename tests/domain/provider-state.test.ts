@@ -1,15 +1,30 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import {
+import { createProviderStateStore } from "../../domain/provider-state";
+import { createModelRegistry } from "../../domain/model-registry";
+
+// Store under test, built with the same order/clock/configured values the composition root uses
+// for the default MODEL_REGISTRY_JSON. Methods are destructured so the assertions below call the
+// same bare names they always did; getStateSnapshot/resetForTesting map to getSnapshot/reset.
+const registry = createModelRegistry({
+    "gpt-oss-120b-balanced": { cerebras: "gpt-oss-120b", groq: "openai/gpt-oss-120b" },
+});
+const store = createProviderStateStore({
+    order: ["cerebras", "groq"],
+    clock: { now: () => Date.now() },
+    configured: { cerebras: true, groq: true },
+    resolveUpstreamModel: registry.resolveUpstreamModel,
+});
+const {
     advanceCursor,
     chooseEligibleProviders,
-    getStateSnapshot,
+    getSnapshot: getStateSnapshot,
     isEligible,
     recordFailure,
     recordSuccess,
-    resetForTesting,
+    reset: resetForTesting,
     setCooldown,
     setRateLimitSnapshot,
-} from "../../routing/provider-state";
+} = store;
 
 const alias = "gpt-oss-120b-balanced";
 

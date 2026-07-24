@@ -3,7 +3,8 @@
 // Per-test scriptability via completeMock.mockImplementationOnce / streamMock.mockImplementationOnce.
 
 import { mock } from 'bun:test';
-import type { CompletionOutcome, ProviderAdapter, StreamChunk } from '../../types';
+import type { CompletionOutcome, StreamChunk } from '../../domain/types';
+import type { ChatProviderPort as ProviderAdapter } from '../../application/ports/chat-provider';
 
 // Upstream model IDs returned by mocks — matching the registry defaults:
 //   gpt-oss-120b-balanced -> cerebras: 'gpt-oss-120b', groq: 'openai/gpt-oss-120b'

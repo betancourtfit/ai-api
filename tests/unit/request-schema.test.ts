@@ -1,8 +1,14 @@
 // request-schema.test.ts — unit tests for model-registry + validation (TDD RED)
 // Tests cover the 5 behavior cases from the original plan + 8 new hardening cases (Plan 01-02)
 import { test, expect, describe } from "bun:test";
-import { validateChatCompletion } from "./request-schema";
-import { isKnownAlias, resolveUpstreamModel } from "./model-registry";
+import { validateChatCompletion } from "../../adapters/inbound/http/schemas/request-schema";
+import { createModelRegistry } from "../../domain/model-registry";
+
+// Registry built from the default MODEL_REGISTRY_JSON literal in config.ts. Destructured so the
+// assertions below call the same bare names they always did.
+const { isKnownAlias, resolveUpstreamModel } = createModelRegistry({
+    "gpt-oss-120b-balanced": { cerebras: "gpt-oss-120b", groq: "openai/gpt-oss-120b" },
+});
 
 describe("validateChatCompletion", () => {
     test("valid body returns success:true with parsed data", () => {

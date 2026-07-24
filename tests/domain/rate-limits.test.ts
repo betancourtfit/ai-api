@@ -3,10 +3,19 @@ import { APIError as CerebrasAPIError } from "@cerebras/cerebras_cloud_sdk";
 import { APIError as GroqAPIError } from "groq-sdk";
 import {
     calcCooldownMs,
-    classifyError,
-    parseCerebrasHeaders,
-    parseGroqHeaders,
-} from "../../routing/cooldown-manager";
+    parseCerebrasHeaders as parseCerebrasHeadersRecord,
+    parseGroqHeaders as parseGroqHeadersRecord,
+} from "../../domain/rate-limits";
+import { classifyUpstreamFailure } from "../../domain/failure-classification";
+import { toHeaderRecord, toUpstreamFailure } from "../../adapters/outbound/sdk-error-mapper";
+
+// The domain parsers take a plain record; flattening any header carrier is the adapter's job.
+// These wrappers apply that seam so the assertions below stay byte-identical.
+const parseCerebrasHeaders = (headers: unknown) =>
+    parseCerebrasHeadersRecord(toHeaderRecord(headers) ?? {});
+const parseGroqHeaders = (headers: unknown) =>
+    parseGroqHeadersRecord(toHeaderRecord(headers) ?? {});
+const classifyError = (err: unknown) => classifyUpstreamFailure(toUpstreamFailure(err));
 
 describe("parseGroqHeaders", () => {
     test("parses duration strings and retry-after", () => {
@@ -152,7 +161,11 @@ describe("classifyError", () => {
     test("returns headers for API errors and retries unknown objects", () => {
         const headers = new Headers({ "retry-after": "2" });
         const apiResult = classifyError(groqError(429, headers));
-        expect(apiResult.headers).toBe(headers);
+        // Phase 8 (V-04): headers cross the port as a flattened, lowercase-keyed record, never as
+        // a WHATWG Headers. The pre-refactor `toBe(headers)` asserted reference identity through
+        // the deleted routing/cooldown-manager shim; the equivalent post-refactor guarantee is
+        // that the same header data survives the flattening.
+        expect(apiResult.headers).toEqual({ "retry-after": "2" });
 
         const unknownResult = classifyError({ nope: true });
         expect(unknownResult).toEqual({

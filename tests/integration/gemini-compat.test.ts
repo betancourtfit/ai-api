@@ -19,8 +19,8 @@
 
 import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { createServer } from '../../index';
-import type { WhisperService } from '../../whisper-service';
-import type { AudioTranscriptionResult } from '../../types';
+import type { TranscriptionPort as WhisperService } from '../../application/ports/transcription';
+import type { AudioTranscriptionResult } from '../../domain/types';
 
 const PROXY_KEY = process.env.PERSONAL_PROXY_API_KEY ?? 'test-proxy-key';
 
