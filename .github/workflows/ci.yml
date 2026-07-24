@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bun 1.1.29 (the Dockerfile's pin) predates the text `bun.lock` format
+      # (introduced in Bun v1.1.39, default in v1.2) and cannot read this repo's
+      # lockfile. Pin to 1.3.11 — the version that produced bun.lock and that the
+      # developer runs locally. Do NOT "helpfully" revert this to match the
+      # Dockerfile; see .planning/quick/260724-p04-ci-minimo-fix-errores-tsc-en-tests-workf/260724-p04-SUMMARY.md.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.11"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      # .env.test is the one tracked env file and is deliberately allowlisted:
+      # Bun auto-loads it under `bun test`, giving CI deterministic config with
+      # no repo secrets. Its contents were human-verified (Task 3 of the quick
+      # task that introduced this workflow) to hold fixtures only, never live keys.
+      - name: Guard - no secret env files tracked
+        run: |
+          tracked="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.(example|test)$' || true)"
+          if [ -n "$tracked" ]; then
+            echo "::error::Tracked secret env file(s) detected outside the allowlist (.env.example, .env.test)"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
+          echo "OK: no tracked env files outside the allowlist (.env.example, .env.test)"
