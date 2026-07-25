@@ -5,12 +5,14 @@ on:
     branches: [master]
   pull_request:
 
-permissions:
-  contents: read
-
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # F-02: permissions moved here from workflow level. verify is the required
+    # check (ruleset require-ci-on-master) and must never inherit registry
+    # write access — contents: read is all it needs.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -112,6 +114,17 @@ jobs:
     needs: verify
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # F-02: packages: write is scoped to this job alone — the only job that
+    # pushes to GHCR — so verify, the required check, never inherits registry
+    # write access. The repo's default_workflow_permissions is read, so this
+    # grant must be explicit here.
+    permissions:
+      contents: read
+      packages: write
+    # IMAGE is a static string (not an expression), so it never reaches a
+    # run: body as an interpolation — safe under constraint 1.
+    env:
+      IMAGE: ghcr.io/betancourtfit/ai-api
     steps:
       - uses: actions/checkout@v7
 
@@ -134,6 +147,27 @@ jobs:
             CACHEBUST=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # T-ukq-05: this is the invariant the publish step re-checks before
+      # pushing. Recording it immediately after the build, before any smoke
+      # runs, is what lets the publish step later prove the pushed bits are
+      # the exact object every smoke ran against — not a rebuild.
+      - name: Record the smoked image id
+        run: |
+          set -euo pipefail
+
+          # No leading $ on the braces below -- {{.Id}} is Go template syntax
+          # for `docker image inspect`, not a GitHub expression.
+          image_id="$(docker image inspect bun-ai-api:ci --format '{{.Id}}')"
+
+          # Anti-vacuous: an unparseable id must never pass silently.
+          if ! printf '%s' "$image_id" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Could not read a plausible image id (got: '$image_id')"
+            exit 1
+          fi
+
+          echo "Smoked image id: $image_id"
+          echo "SMOKED_IMAGE_ID=$image_id" >> "$GITHUB_ENV"
 
       # Absolute, non-decaying floor on the image's own Bun binary. 1.1.39 is
       # the release that introduced the text lockfile format, so this floor
@@ -310,6 +344,52 @@ jobs:
             exit 1
           fi
           echo "OK: image size ${size_mib} MiB is below the 900 MiB ceiling"
+
+      # T-ukq-01: the gate that makes going *public* safe (F-08 — the GHCR
+      # package will be world-readable). On CI the build context is a clean
+      # actions/checkout of an already-public repo, so a public image exposes
+      # nothing that is not already public on GitHub. .dockerignore excludes
+      # .env and .env.local by exact name only, so this is the tripwire for a
+      # future .env.production-style file. The credential-prefix scan over the
+      # two allowlisted files is not duplicated here: needs: verify already
+      # ran it against the byte-identical tracked files at this same commit.
+      - name: Verify the image ships no unexpected env file
+        run: |
+          set -euo pipefail
+
+          found="$(docker run --rm --entrypoint sh bun-ai-api:ci -c 'find /app -maxdepth 2 -name ".env*" -type f 2>/dev/null' || true)"
+          if [ -n "$found" ]; then
+            failed=0
+            while IFS= read -r path; do
+              [ -z "$path" ] && continue
+              case "$path" in
+                /app/.env.example|/app/.env.test)
+                  ;;
+                *)
+                  echo "::error::Unexpected env file baked into the image: $path"
+                  failed=1
+                  ;;
+              esac
+            done <<EOF
+          $found
+          EOF
+            if [ "$failed" -ne 0 ]; then
+              exit 1
+            fi
+          fi
+          echo "OK: no unexpected .env* files in the image"
+
+          # Anti-vacuous companion, mirroring the probe already used by the
+          # whisper-model gate above: prove `find` actually works inside this
+          # image and /app is the right root, so a broken find invocation
+          # cannot silently read as "no env files found".
+          package_json_hit="$(docker run --rm --entrypoint sh bun-ai-api:ci -c 'find /app -maxdepth 1 -name "package.json" -type f 2>/dev/null' || true)"
+          package_json_count="$(printf '%s\n' "$package_json_hit" | grep -c . || true)"
+          if [ "$package_json_count" -ne 1 ]; then
+            echo "::error::Anti-vacuous probe failed: expected exactly one /app/package.json, found $package_json_count -- the find-based env-file gate above cannot be trusted"
+            exit 1
+          fi
+          echo "OK: find probe confirmed working"
 
       # The only step here that can hang: without a timeout a wedged container
       # burns runner minutes until the 6-hour job default. This step starts the
@@ -635,6 +715,51 @@ jobs:
           echo "$degraded_ready_body" | jq -e '.ready == true' >/dev/null
           echo "$degraded_ready_body" | jq -e '.whisperAvailable == false' >/dev/null
           echo "OK: smoke-degraded /ready reports ready==true, whisperAvailable==false -- degradation is observable, not silent"
+
+      # Plain `docker login`, not a third-party action -- no new supply-chain
+      # dependency for three lines (T-ukq-SC). No PAT: the package will be
+      # public and the push is made by the repo's own token (F-03).
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # T-ukq-05: publishes by re-tagging and pushing the same local
+      # bun-ai-api:ci object every smoke above ran against -- never a second
+      # build, never push: true on the build step. $GITHUB_SHA and
+      # $GITHUB_ACTOR are plain runner environment variables (constraint 1).
+      - name: Publish image to GHCR
+        run: |
+          set -euo pipefail
+
+          # Re-assert the invariant recorded right after the build: what is
+          # about to be published must still be the exact object every smoke
+          # above ran, not a rebuild.
+          current_id="$(docker image inspect bun-ai-api:ci --format '{{.Id}}')"
+          if [ "$current_id" != "$SMOKED_IMAGE_ID" ]; then
+            echo "::error::Image id changed between the smoked build and publish ($SMOKED_IMAGE_ID -> $current_id) -- refusing to publish an image that was never smoked"
+            exit 1
+          fi
+          echo "OK: publishing the exact image every smoke ran against ($current_id)"
+
+          docker tag bun-ai-api:ci "$IMAGE:$GITHUB_SHA"
+          docker tag bun-ai-api:ci "$IMAGE:latest"
+
+          # Both tags pushed unconditionally: this job already carries
+          # if: github.event_name == 'push', and the workflow only triggers
+          # push on master, so :latest here always means "newest master
+          # build" -- not an accidental promotion of a PR or branch build.
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+
+          # Safe to log: the package is public. This digest is the rollback
+          # handle referenced in README.md.
+          digest="$(docker image inspect "$IMAGE:$GITHUB_SHA" --format '{{index .RepoDigests 0}}')"
+          echo "Rollback handle (repo digest): $digest"
+
+          docker logout ghcr.io >/dev/null 2>&1 || true
 
       # Must sit after the smoke steps and before cleanup, otherwise the
       # containers are already gone when it runs. if: failure() rather than
