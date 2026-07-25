@@ -461,10 +461,19 @@ jobs:
           excerpt="$(jq -r '.text' "$RUNNER_TEMP/smoke-transcription.json" | cut -c1-200)"
           echo "Transcript excerpt: $excerpt"
 
-          # A free diagnostic, never a failure, about whether /ready's whisper
-          # field can be trusted.
+          # A free diagnostic, never a failure. On a COLD boot this is the
+          # expected reading, not a defect: /ready is polled while the model
+          # is still downloading in start.sh's background subshell, so
+          # whisper-server has not been launched yet and health() cannot
+          # succeed. The transcription below runs seconds later, once the
+          # model has landed. Run 30134777498 -- back when the model was
+          # baked into the image and whisper-server started immediately --
+          # reported whisperAvailable:true, which is what rules out the
+          # other candidate explanation (that the pinned v1.7.6 build has no
+          # GET /health endpoint). Production sees this same window on the
+          # first boot after the volume is empty.
           if [ "$whisper_available" != "true" ]; then
-            echo "::warning::/ready reported whisperAvailable=false while a real transcription succeeded — HttpWhisperService.health() probes GET /health on whisper-server and that endpoint may not exist on the pinned v1.7.6 build"
+            echo "::warning::/ready reported whisperAvailable=false while a real transcription succeeded — expected on a cold boot: the model was still downloading when /ready was polled, so whisper-server had not started yet"
           fi
 
           # D-09: the transcription above proves whisper-server started, but
