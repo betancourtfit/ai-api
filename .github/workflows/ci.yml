@@ -784,3 +784,171 @@ jobs:
         run: |
           docker rm -f smoke smoke-warm smoke-degraded || true
           docker volume rm -f smoke-models || true
+
+  # needs: docker-image is load-bearing -- the webhook must not fire until
+  # :latest on GHCR actually points at this commit. if: github.event_name ==
+  # 'push' is belt and braces (F-11): a skipped `needs` already skips this
+  # job, but a fork PR must never be able to reach the deploy path.
+  deploy:
+    needs: docker-image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # No packages scope here -- that is the whole point of the per-job split
+    # in the docker-image job above. This job never touches the registry.
+    permissions:
+      contents: read
+    # No actions/checkout: this job needs only curl and jq, both preinstalled
+    # on ubuntu-latest.
+    #
+    # Job-level env is required here rather than gating on `if: secrets.X`:
+    # the `secrets` context is NOT available in any `if:` condition (verified
+    # against GitHub's context availability table -- job-level `if` sees only
+    # github/needs/vars/inputs, step-level `if` adds env/steps but never
+    # secrets). The skip is implemented in-shell instead, which also keeps
+    # the guard readable.
+    env:
+      EASYPANEL_DEPLOY_WEBHOOK: ${{ secrets.EASYPANEL_DEPLOY_WEBHOOK }}
+      PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+    steps:
+      # F-04: a missing secret is a clean skip, never a failure -- the
+      # operator is creating these secrets in parallel and the workflow must
+      # not go red meanwhile.
+      - name: Trigger EasyPanel deploy
+        id: deploy
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EASYPANEL_DEPLOY_WEBHOOK:-}" ]; then
+            echo "::notice::EASYPANEL_DEPLOY_WEBHOOK is not set - skipping deploy and post-deploy smoke. Add the secret in Settings -> Secrets and variables -> Actions (see README 'Deploy pipeline')."
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # -s without -S is deliberate (constraint 3): curl's error text can
+          # contain the host and GitHub only masks exact-string matches.
+          code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X POST "$EASYPANEL_DEPLOY_WEBHOOK" || echo 000)"
+
+          if ! printf '%s' "$code" | grep -qE '^2[0-9][0-9]$'; then
+            echo "::error::EasyPanel deploy webhook returned HTTP $code (URL deliberately not printed)"
+            exit 1
+          fi
+
+          echo "Deploy webhook accepted (HTTP $code)"
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      # steps context *is* available in a step-level if, unlike secrets.
+      - name: Smoke - post-deploy
+        if: steps.deploy.outputs.deployed == 'true'
+        timeout-minutes: 15
+        env:
+          # Every budget lives here so it is tunable in one place and no
+          # literal appears twice.
+          HEALTH_BUDGET_SECONDS: "720"
+          HEALTH_CONSECUTIVE: "3"
+          WHISPER_BUDGET_SECONDS: "180"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PUBLIC_BASE_URL:-}" ]; then
+            echo "::notice::PUBLIC_BASE_URL is not set - the deploy was triggered but production was not verified. Add the secret to enable the post-deploy smoke."
+            exit 0
+          fi
+
+          # Strip a trailing slash to tolerate either form. This produces a
+          # string GitHub has not registered as a secret, so it must be
+          # masked explicitly before it can reach any log line.
+          base="${PUBLIC_BASE_URL%/}"
+          echo "::add-mask::$base"
+
+          # Poll /health for convergence. Requiring N consecutive matches is
+          # the fix for the rollout race (F-07): EasyPanel can replace the
+          # container in place, and for a window the *old* container still
+          # answers 200 -- a poll that accepts the first good read can pass
+          # against a container that is about to die.
+          expected="ok ${GITHUB_SHA}"
+          deadline=$(( $(date +%s) + HEALTH_BUDGET_SECONDS ))
+          consecutive=0
+          last=""
+          converged=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            body="$(curl -s -m 10 "$base/health" 2>/dev/null || true)"
+            last="$body"
+            if [ "$body" = "$expected" ]; then
+              consecutive=$((consecutive + 1))
+              echo "match $consecutive/$HEALTH_CONSECUTIVE"
+              if [ "$consecutive" -ge "$HEALTH_CONSECUTIVE" ]; then
+                converged=1
+                break
+              fi
+            else
+              if [ "$consecutive" -gt 0 ]; then
+                echo "::warning::reading reverted - rollout still converging"
+              fi
+              consecutive=0
+            fi
+            sleep 5
+          done
+
+          if [ "$converged" -ne 1 ]; then
+            echo "::error::/health never returned the expected build stamp for $HEALTH_CONSECUTIVE consecutive reads within ${HEALTH_BUDGET_SECONDS}s (last body: '$last')"
+            case "$last" in
+              "ok "*)
+                remainder="${last#ok }"
+                if ! printf '%s' "$remainder" | grep -qE '^[0-9a-f]{40}$'; then
+                  echo "::error::production reported build stamp '$remainder' - EasyPanel still has a BUILD_VERSION environment variable set, which overrides the value baked into the image; delete it (see README 'Deploy pipeline')"
+                fi
+                ;;
+              "")
+                echo "::error::no response from /health - the service may still be pulling the image, or EasyPanel is still building from git instead of deploying ghcr.io/betancourtfit/ai-api:latest"
+                ;;
+            esac
+            exit 1
+          fi
+
+          # /health returns ok <version> unconditionally and never touches
+          # whisper or the providers, so a /health-only smoke is a structural
+          # false green (F-07). /ready is the real readiness check.
+          ready_code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' -m 15 "$base/ready" || echo 000)"
+          if [ "$ready_code" != "200" ]; then
+            echo "::error::/ready returned HTTP $ready_code"
+            cat "$RUNNER_TEMP/ready.json" || true
+            exit 1
+          fi
+          if ! jq -e '.ready == true' "$RUNNER_TEMP/ready.json" >/dev/null; then
+            echo "::error::/ready did not report ready:true"
+            cat "$RUNNER_TEMP/ready.json"
+            exit 1
+          fi
+          # No secrets in this body -- provider names and booleans only.
+          cat "$RUNNER_TEMP/ready.json"
+          # mode: "degraded" is a legitimate documented state (CLAUDE.md
+          # section 20) and must not fail a deploy -- printed for the record,
+          # never gated on.
+          jq -r '"mode: " + .mode, "eligibleProviders: " + (.eligibleProviders | tostring)' "$RUNNER_TEMP/ready.json"
+
+          # Whisper is a warning-only budget (F-07): production's volume is
+          # already populated, so this should be a cache hit, and a slow
+          # model download is not a bad deploy.
+          whisper_available="$(jq -r '.whisperAvailable' "$RUNNER_TEMP/ready.json")"
+          if [ "$whisper_available" != "true" ]; then
+            whisper_deadline=$(( $(date +%s) + WHISPER_BUDGET_SECONDS ))
+            whisper_start="$(date +%s)"
+            whisper_ok=0
+            while [ "$(date +%s)" -lt "$whisper_deadline" ]; do
+              sleep 10
+              code2="$(curl -s -o "$RUNNER_TEMP/ready2.json" -w '%{http_code}' -m 15 "$base/ready" || echo 000)"
+              if [ "$code2" = "200" ] && jq -e '.whisperAvailable == true' "$RUNNER_TEMP/ready2.json" >/dev/null 2>&1; then
+                whisper_ok=1
+                break
+              fi
+            done
+            if [ "$whisper_ok" -eq 1 ]; then
+              elapsed=$(( $(date +%s) - whisper_start ))
+              echo "whisperAvailable flipped to true after ${elapsed}s"
+            else
+              echo "::warning::/ready reports whisperAvailable=false after ${WHISPER_BUDGET_SECONDS}s - expected only when the /models volume is empty and the 466 MB model is still downloading; transcriptions 503 until it lands, chat proxying is unaffected"
+            fi
+          fi
+
+          echo "Verified production converged to $GITHUB_SHA"
