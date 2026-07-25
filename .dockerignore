@@ -17,6 +17,14 @@ dist/
 # Any local whisper.cpp source checkout (can be large)
 whisper.cpp/
 
+# Models now live in the runtime volume, provisioned by ensure-model.sh
+# (quick task 260724-mv1) — not baked into the image. Without this rule a
+# local build on a machine that happens to have ggml-tiny.bin on disk would
+# silently re-fatten the image and make the CI size gate host-dependent.
+# whisper-models/ itself stays out of this rule: sample.wav is tracked and
+# harmless in the build context.
+whisper-models/*.bin
+
 # OS and editor cruft
 .DS_Store
 *.swp

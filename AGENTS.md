@@ -241,6 +241,14 @@ MODEL_REGISTRY_JSON={"gpt-oss-120b-balanced":{"cerebras":"gpt-oss-120b","groq":"
 
 EXPOSE_PROVIDER_HEADER=false
 ENABLE_INTERNAL_STATUS_ENDPOINT=true
+
+# Whisper model provisioning (runtime volume)
+# Model is provisioned into /models at boot by ensure-model.sh and is no
+# longer part of the image (quick task 260724-mv1).
+
+WHISPER_MODEL_PATH=/models/ggml-small.bin
+WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+WHISPER_MODEL_SHA256=1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
 ```
 
 Do not hardcode secrets.

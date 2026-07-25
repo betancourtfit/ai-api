@@ -47,14 +47,13 @@ RUN cmake -B build -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LI
 
 # Binary is at /whisper.cpp/build/bin/whisper-server
 
-# Fetch the whisper model at build time. The model is git-ignored (~466MB) so it is
-# NOT in a clean checkout — a build-from-git deploy (EasyPanel/CI) would otherwise
-# ship without it and every transcription would 503. -f fails the build loudly on
-# any HTTP error rather than baking an empty file. SHA pinned to detect upstream drift.
-RUN mkdir -p /models \
-    && curl -fL -o /models/ggml-small.bin \
-       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin \
-    && echo "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  /models/ggml-small.bin" | sha256sum -c -
+# The model is no longer fetched or baked into the image (quick task 260724-mv1):
+# it is now provisioned at container boot into the /models runtime volume by
+# ensure-model.sh, sha256-verified, so the 426 MB blob stops re-entering every
+# GHA layer cache. `curl` stays in this stage's apt-get line above even though
+# it is now unused here — editing that instruction would invalidate every
+# cached layer below it and force a full whisper.cpp recompile to save ~3 MB in
+# a stage that never ships.
 
 # ============================================================
 # Stage 2: final — Bun proxy + whisper-server sidecar
@@ -66,9 +65,13 @@ WORKDIR /app
 
 # Runtime deps: libgomp1 (OpenMP; libstdc++ already in base) and ffmpeg, which
 # whisper-server --convert shells out to for non-WAV inputs (m4a/mp4/webm/aac —
-# the iOS/n8n-default formats). Without it those uploads 503.
+# the iOS/n8n-default formats). Without it those uploads 503. curl and
+# ca-certificates (D-10) are added because ensure-model.sh needs an https
+# downloader with real TLS verification and `curl` is absent from the
+# oven/bun base image; mild attack-surface increase accepted for a
+# single-user personal deployment that already ships bash, bun and ffmpeg.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 ffmpeg \
+    && apt-get install -y --no-install-recommends libgomp1 ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy compiled whisper-server binary onto PATH.
@@ -85,15 +88,11 @@ RUN bun install --frozen-lockfile
 ARG CACHEBUST=0
 RUN echo "cachebust=${CACHEBUST}"
 
-# Copy the full application (includes index.ts, start.sh, etc.).
+# Copy the full application (includes index.ts, start.sh, ensure-model.sh, etc.).
 COPY . .
 
-# Place the build-fetched model AFTER `COPY . .` so it is always present even on a
-# clean checkout where whisper-models/ggml-small.bin is absent from the build context.
-COPY --from=builder /models/ggml-small.bin whisper-models/ggml-small.bin
-
-# Make the entrypoint executable.
-RUN chmod +x start.sh
+# Make the entrypoints executable.
+RUN chmod +x start.sh ensure-model.sh
 
 # Environment
 ENV NODE_ENV=production
@@ -103,6 +102,21 @@ ENV WHISPER_PORT=8080
 # Surfaced by GET /health so you can confirm which build is live (CACHEBUST is
 # still in scope from its declaration above).
 ENV BUILD_VERSION=${CACHEBUST}
+
+# Whisper model provisioning (runtime volume, quick task 260724-mv1). The
+# production model identity is unchanged — still ggml-small — only its
+# *location* moved out of the image and into /models. These three must move
+# together whenever the model changes, and must stay byte-identical to the
+# :- fallbacks in start.sh so `docker inspect` and a bare `./start.sh` agree.
+ENV WHISPER_MODEL_PATH=/models/ggml-small.bin
+ENV WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+ENV WHISPER_MODEL_SHA256=1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
+
+# Ensure the mount point exists so a bare `docker run` (no volume attached)
+# still gets an anonymous volume rather than writing into the image layer.
+# EasyPanel must mount a persistent volume at /models — see README.md.
+RUN mkdir -p /models
+VOLUME /models
 
 EXPOSE 3001
 
