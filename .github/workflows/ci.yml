@@ -238,6 +238,61 @@ jobs:
 
           echo "Success: all $count image dependencies match bun.lock."
 
+      # Quick task 260724-mv1 moved the whisper model out of the image and
+      # into a runtime volume provisioned by ensure-model.sh. This step is
+      # the proof: it gates the image's own size and structurally confirms
+      # no ggml-*.bin blob crept back in, before any container is even
+      # started.
+      - name: Verify the image ships no whisper model
+        run: |
+          set -euo pipefail
+
+          # No leading $ on the braces below -- {{.Size}} is Go template
+          # syntax for `docker image inspect`, not a GitHub expression.
+          size_bytes="$(docker image inspect bun-ai-api:ci --format '{{.Size}}')"
+          size_mib="$(( size_bytes / 1024 / 1024 ))"
+          echo "Image size: ${size_bytes} bytes (~${size_mib} MiB)"
+
+          # Anti-vacuous floor first: a parse failure yielding an empty or
+          # non-numeric value (which would compare as 0) must never pass
+          # silently as "small enough".
+          if ! printf '%s' "$size_bytes" | grep -qE '^[0-9]+$' || [ "$size_bytes" -lt 104857600 ]; then
+            echo "::error::Could not read a plausible image size (got: '$size_bytes') -- the size gate is not covering the real image"
+            exit 1
+          fi
+
+          # Ceiling: the image without a model is expected around 350 MiB,
+          # and today's image with ggml-small baked in is around 840 MiB, so
+          # 600 MiB sits far from both edges and can only trip if a
+          # model-sized blob returns.
+          if [ "$size_bytes" -ge 629145600 ]; then
+            echo "::error::Image is ${size_mib} MiB, at or above the 600 MiB ceiling -- a model-sized blob may have re-entered the image"
+            exit 1
+          fi
+          echo "OK: image size ${size_mib} MiB is below the 600 MiB ceiling"
+
+          # Structural gate: the precise one. ggml-*.bin (not *.bin) so a
+          # data file inside node_modules can never produce a false
+          # positive.
+          found="$(docker run --rm --entrypoint sh bun-ai-api:ci -c 'find /app /models -name "ggml-*.bin" -type f 2>/dev/null' || true)"
+          if [ -n "$found" ]; then
+            echo "::error::Found whisper model file(s) baked into the image:"
+            printf '%s\n' "$found"
+            exit 1
+          fi
+
+          # Anti-vacuous companion: prove `find` actually works inside this
+          # image and /app is the right root, so a broken find invocation
+          # above cannot silently read as "no model found".
+          package_json_hit="$(docker run --rm --entrypoint sh bun-ai-api:ci -c 'find /app -maxdepth 1 -name "package.json" -type f 2>/dev/null' || true)"
+          package_json_count="$(printf '%s\n' "$package_json_hit" | grep -c . || true)"
+          if [ "$package_json_count" -ne 1 ]; then
+            echo "::error::Anti-vacuous probe failed: expected exactly one /app/package.json, found $package_json_count -- the find-based model gate above cannot be trusted"
+            exit 1
+          fi
+
+          echo "OK: no ggml-*.bin anywhere in the image, find probe confirmed working"
+
       # The only step here that can hang: without a timeout a wedged container
       # burns runner minutes until the 6-hour job default. This step starts the
       # production image under its REAL entrypoint (start.sh) for the first
@@ -273,12 +328,22 @@ jobs:
           # and config.hostname reads it, so the app binds the container's own
           # IP — which is exactly what production does today. Overriding it
           # would mask production behaviour.
+          #
+          # -v smoke-models:/models (Docker creates the named volume on
+          # demand) plus the three tiny-model overrides is D-02: CI proves
+          # the real download/verify/install mechanism with the 77 MB tiny
+          # model while production defaults to the 466 MB small model. All
+          # three overrides must move together.
           docker run -d --name smoke -p 3001:3001 \
+            -v smoke-models:/models \
             -e PERSONAL_PROXY_API_KEY=ci-smoke-not-a-real-key \
             -e CEREBRAS_API_KEY=ci-dummy-cerebras \
             -e GROQ_API_KEY=ci-dummy-groq \
             -e WHISPER_MODEL_ALIAS=whisper-1 \
             -e WHISPER_TIMEOUT_MS=180000 \
+            -e WHISPER_MODEL_PATH=/models/ggml-tiny.bin \
+            -e WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
+            -e WHISPER_MODEL_SHA256=be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 \
             bun-ai-api:ci
 
           # Wait for liveness via retries, never a fixed sleep. On each
@@ -326,7 +391,8 @@ jobs:
           # "degraded" result means the store's configured map did not see
           # them. whisperAvailable is captured but never gated on here —
           # whisper.cpp's own GET /health may 404 on the pinned v1.7.6 build,
-          # and the 466 MB model may still be loading at this point.
+          # and the 77 MB tiny model, downloading into the smoke-models
+          # volume in the background subshell, may still be loading here.
           ready_body="$(curl -fsS -m 10 http://127.0.0.1:3001/ready)"
           echo "$ready_body"
           echo "$ready_body" | jq -e '.ready == true' >/dev/null
@@ -383,18 +449,186 @@ jobs:
             echo "::warning::/ready reported whisperAvailable=false while a real transcription succeeded — HttpWhisperService.health() probes GET /health on whisper-server and that endpoint may not exist on the pinned v1.7.6 build"
           fi
 
-      # Must sit after the smoke step and before cleanup, otherwise the
-      # container is already gone when it runs. if: failure() rather than
+          # D-09: the transcription above proves whisper-server started, but
+          # not that it started from a model this run actually downloaded --
+          # a pre-seeded volume could pass the same assertions. These two
+          # log markers are the proof that the real cold-download code path
+          # ran, not just the cache-hit path.
+          cold_logs="$(docker logs smoke 2>&1)"
+          if ! printf '%s' "$cold_logs" | grep -qF 'whisper-model: downloading from'; then
+            echo "::error::container logs never showed 'whisper-model: downloading from' -- the cold download path did not run"
+            exit 1
+          fi
+          if ! printf '%s' "$cold_logs" | grep -qF 'whisper-model: install ok at'; then
+            echo "::error::container logs never showed 'whisper-model: install ok at' -- the model was never installed"
+            exit 1
+          fi
+          echo "OK: cold boot proved the real download + install path"
+
+      # D-09: the cold smoke above proves the download path; this step
+      # proves the two paths that run on every subsequent boot. Both
+      # containers share the same populated smoke-models volume from the
+      # cold boot above, on ports that do not collide with the still-running
+      # `smoke` container. whisper-server binds 127.0.0.1:8080 inside each
+      # container's own network namespace, so there is no sidecar port
+      # conflict between the three containers.
+      - name: Smoke - warm boot and degraded boot
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+
+          # Warm: same tiny-model overrides as the cold container, on the
+          # same volume -- this is the path that runs on every production
+          # boot after the first.
+          docker run -d --name smoke-warm -p 3002:3001 \
+            -v smoke-models:/models \
+            -e PERSONAL_PROXY_API_KEY=ci-smoke-not-a-real-key \
+            -e CEREBRAS_API_KEY=ci-dummy-cerebras \
+            -e GROQ_API_KEY=ci-dummy-groq \
+            -e WHISPER_MODEL_ALIAS=whisper-1 \
+            -e WHISPER_TIMEOUT_MS=180000 \
+            -e WHISPER_MODEL_PATH=/models/ggml-tiny.bin \
+            -e WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin \
+            -e WHISPER_MODEL_SHA256=be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 \
+            bun-ai-api:ci
+
+          up=0
+          for i in $(seq 1 60); do
+            running="$(docker inspect -f '{{.State.Running}}' smoke-warm 2>/dev/null || echo false)"
+            if [ "$running" != "true" ]; then
+              echo "::error::smoke-warm exited during startup"
+              exit 1
+            fi
+            if curl -fsS -m 2 http://127.0.0.1:3002/health >/dev/null 2>&1; then
+              up=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "::error::smoke-warm /health never answered within 60s"
+            exit 1
+          fi
+
+          # Provisioning runs in a background subshell (D-04), so the cache
+          # hit marker can trail /health by a moment -- poll the logs rather
+          # than asserting immediately.
+          warm_cache_hit=0
+          for i in $(seq 1 30); do
+            if docker logs smoke-warm 2>&1 | grep -qF 'whisper-model: cache hit at'; then
+              warm_cache_hit=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$warm_cache_hit" -ne 1 ]; then
+            echo "::error::smoke-warm never logged 'whisper-model: cache hit at' within 30s"
+            exit 1
+          fi
+
+          # Non-vacuous negative assertion: only meaningful once the cache
+          # hit marker above has actually been observed.
+          warm_logs="$(docker logs smoke-warm 2>&1)"
+          if printf '%s' "$warm_logs" | grep -qF 'whisper-model: downloading from'; then
+            echo "::error::smoke-warm re-downloaded the model instead of hitting the cache"
+            exit 1
+          fi
+          echo "OK: warm boot hit the cache without downloading"
+
+          # Degraded: a real 404 URL and a path the volume has never seen.
+          # The dummy proxy/provider keys and the tiny checksum value stay
+          # the same -- only the model source is broken.
+          docker run -d --name smoke-degraded -p 3003:3001 \
+            -v smoke-models:/models \
+            -e PERSONAL_PROXY_API_KEY=ci-smoke-not-a-real-key \
+            -e CEREBRAS_API_KEY=ci-dummy-cerebras \
+            -e GROQ_API_KEY=ci-dummy-groq \
+            -e WHISPER_MODEL_ALIAS=whisper-1 \
+            -e WHISPER_TIMEOUT_MS=180000 \
+            -e WHISPER_MODEL_PATH=/models/ggml-absent.bin \
+            -e WHISPER_MODEL_URL=https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-nope.bin \
+            -e WHISPER_MODEL_SHA256=be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 \
+            bun-ai-api:ci
+
+          up=0
+          for i in $(seq 1 60); do
+            running="$(docker inspect -f '{{.State.Running}}' smoke-degraded 2>/dev/null || echo false)"
+            if [ "$running" != "true" ]; then
+              echo "::error::smoke-degraded exited during startup"
+              exit 1
+            fi
+            if curl -fsS -m 2 http://127.0.0.1:3003/health >/dev/null 2>&1; then
+              up=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "::error::smoke-degraded /health never answered within 60s"
+            exit 1
+          fi
+
+          degraded_health="$(curl -fsS -m 5 http://127.0.0.1:3003/health)"
+          expected_health="ok ${GITHUB_SHA}"
+          if [ "$degraded_health" != "$expected_health" ]; then
+            echo "::error::smoke-degraded /health returned '$degraded_health', expected '$expected_health'"
+            exit 1
+          fi
+          echo "OK: smoke-degraded /health == $expected_health"
+
+          degraded_unavailable=0
+          for i in $(seq 1 30); do
+            if docker logs smoke-degraded 2>&1 | grep -qF 'whisper-model: unavailable:'; then
+              degraded_unavailable=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$degraded_unavailable" -ne 1 ]; then
+            echo "::error::smoke-degraded never logged 'whisper-model: unavailable:' within 30s"
+            exit 1
+          fi
+          echo "OK: smoke-degraded logged the provisioning failure"
+
+          # D-05: the container must survive the failure rather than
+          # crash-loop. The cold step's real transcription is what keeps
+          # this whisperAvailable:false check from being a vacuous result --
+          # this run proves the *same image* transcribes for real when
+          # provisioning succeeds.
+          sleep 10
+          running="$(docker inspect -f '{{.State.Running}}' smoke-degraded 2>/dev/null || echo false)"
+          if [ "$running" != "true" ]; then
+            echo "::error::smoke-degraded is no longer running 10s after the provisioning failure -- it crash-looped"
+            exit 1
+          fi
+          echo "OK: smoke-degraded is still running 10s after the provisioning failure"
+
+          degraded_ready_body="$(curl -fsS -m 10 http://127.0.0.1:3003/ready)"
+          echo "$degraded_ready_body"
+          echo "$degraded_ready_body" | jq -e '.ready == true' >/dev/null
+          echo "$degraded_ready_body" | jq -e '.whisperAvailable == false' >/dev/null
+          echo "OK: smoke-degraded /ready reports ready==true, whisperAvailable==false -- degradation is observable, not silent"
+
+      # Must sit after the smoke steps and before cleanup, otherwise the
+      # containers are already gone when it runs. if: failure() rather than
       # always() keeps green runs quiet. Safe to print: the app's structured
       # logger emits metadata only, never keys, prompts, responses, or
-      # transcripts (CLAUDE.md #19), and every credential in this container is
-      # a dummy anyway.
+      # transcripts (CLAUDE.md #19), and every credential in these containers
+      # is a dummy anyway. Each `|| true` stops a container that was never
+      # created from aborting this step.
       - name: Smoke - container logs on failure
         if: failure()
-        run: docker logs smoke || true
+        run: |
+          docker logs smoke || true
+          docker logs smoke-warm || true
+          docker logs smoke-degraded || true
 
-      # Always runs so a failed smoke never leaks a running container into a
-      # subsequent step or a self-hosted runner.
-      - name: Smoke - remove container
+      # Always runs so a failed smoke never leaks a running container or
+      # volume into a subsequent step or a self-hosted runner. Container
+      # removal has to come first -- `docker volume rm` refuses while a
+      # container still references the volume.
+      - name: Smoke - remove containers and volume
         if: always()
-        run: docker rm -f smoke || true
+        run: |
+          docker rm -f smoke smoke-warm smoke-degraded || true
+          docker volume rm -f smoke-models || true
