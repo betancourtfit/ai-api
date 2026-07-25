@@ -825,12 +825,41 @@ jobs:
             exit 0
           fi
 
+          # Strip surrounding whitespace and any CR/LF. Pasting a URL into the
+          # GitHub secrets UI very easily carries a trailing newline, and curl
+          # rejects the result as a malformed URL without ever opening a
+          # connection -- which surfaces as HTTP 000 and looks identical to a
+          # DNS or TLS failure. Run 30138218718 failed exactly this way.
+          url="$(printf '%s' "$EASYPANEL_DEPLOY_WEBHOOK" | tr -d '\r\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+          # Shape check before spending a request. Never print the URL itself:
+          # this log is public and GitHub only masks exact-string matches, so a
+          # trimmed value would no longer match the registered secret and would
+          # print in the clear.
+          if ! printf '%s' "$url" | grep -qE '^https://[^[:space:]]+$'; then
+            echo "::error::EASYPANEL_DEPLOY_WEBHOOK is not a well-formed https:// URL (length after trimming: ${#url}). Re-paste it with no leading/trailing whitespace or newline."
+            exit 1
+          fi
+
           # -s without -S is deliberate (constraint 3): curl's error text can
           # contain the host and GitHub only masks exact-string matches.
-          code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X POST "$EASYPANEL_DEPLOY_WEBHOOK" || echo 000)"
+          # curl's own exit code is captured separately -- without it, a
+          # connection that never completes reports HTTP 000 and there is no
+          # way to tell DNS (6) from refused (7) from timeout (28) from TLS
+          # (35/60). The previous `|| echo 000` also concatenated onto curl's
+          # own 000, producing the nonsensical "000000".
+          set +e
+          code="$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X POST "$url")"
+          curl_rc=$?
+          set -e
+
+          if [ "$curl_rc" -ne 0 ]; then
+            echo "::error::Could not reach the EasyPanel deploy webhook — curl exit $curl_rc, HTTP $code (URL deliberately not printed). 6=DNS, 7=connection refused, 28=timeout, 35/60=TLS. If DNS or TLS: the panel may not be reachable from GitHub's runners. If the shape check above passed but curl still refuses, re-copy the webhook URL from EasyPanel."
+            exit 1
+          fi
 
           if ! printf '%s' "$code" | grep -qE '^2[0-9][0-9]$'; then
-            echo "::error::EasyPanel deploy webhook returned HTTP $code (URL deliberately not printed)"
+            echo "::error::EasyPanel deploy webhook returned HTTP $code (URL deliberately not printed). 401/403 means the token in the URL is wrong or expired; 404 means the webhook path is wrong; 405 means it expects a different HTTP method."
             exit 1
           fi
 
