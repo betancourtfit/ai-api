@@ -79,6 +79,18 @@ The cold smoke's `/ready` reported `whisperAvailable: false` **while the transcr
 
 **Production will show this same window on the first boot after the volume is empty:** `/health` returns `ok <sha>`, `/ready` returns `ready:true` with `whisperAvailable:false`, and transcriptions 503 until the 466 MB download completes. Chat proxying works throughout. The misleading warning text was corrected so a future reader is not sent chasing a whisper-server endpoint that does exist.
 
+### Verified in production (2026-07-25)
+
+Deployed to the EasyPanel mini PC and walked end to end by the developer:
+
+- A persistent EasyPanel volume named `whisper-models` was mounted at `/models` (type Volume, not a bind mount).
+- The image built on the mini PC with the new Dockerfile: `#18 [stage-1 10/10] RUN mkdir -p /models`, `### Success`. The whisper.cpp compile layer came from the local cache, so no recompile.
+- `GET /health` → `200 ok v1`. Note: `BUILD_VERSION` reads `v1`, a static value configured in EasyPanel, not a commit SHA — EasyPanel builds from git without passing `CACHEBUST`, so build identity is not yet traceable in production. That is what the GHCR step fixes.
+- `GET /ready` → `{"ready":true,"mode":"ok","eligibleProviders":["cerebras","groq"],"unavailableProviders":[],"whisperAvailable":true}` — the model provisioned into the volume and whisper-server came up.
+- **Persistence confirmed:** a second deploy recreated the container, and `/ready` returned `whisperAvailable: true` immediately afterwards. A 466 MB download cannot complete in that window, so the volume was reused rather than re-provisioned. The literal `cache hit at` log line was not read; this is strong evidence rather than direct observation.
+
+Two pre-existing BuildKit warnings appeared and are expected: `FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64"` on both stages. The pin is deliberate — the deploy target is an amd64 mini PC and the image is sometimes built from an arm64 host — and is documented in the Dockerfile comments.
+
 ### Not verified
 
 `mode` stays `"ok"` in `/ready` even when whisper is unavailable — only `whisperAvailable` reflects it. Whether that field *should* read `"degraded"` is an app-behaviour question outside this task's scope; the readiness contract in `CLAUDE.md` §20 defines `mode` in terms of provider availability, not whisper.
