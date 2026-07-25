@@ -247,33 +247,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # No leading $ on the braces below -- {{.Size}} is Go template
-          # syntax for `docker image inspect`, not a GitHub expression.
-          size_bytes="$(docker image inspect bun-ai-api:ci --format '{{.Size}}')"
-          size_mib="$(( size_bytes / 1024 / 1024 ))"
-          echo "Image size: ${size_bytes} bytes (~${size_mib} MiB)"
+          # ORDER IS DELIBERATE: the structural check runs FIRST because it is
+          # the precise one -- it answers "is a model in the image?" directly.
+          # The size gate is a coarse tripwire whose threshold is an estimate,
+          # so it must never be able to fail the job before the precise check
+          # has reported. Run 30136048728 is why: the size ceiling was set
+          # from a bad estimate, tripped at 709 MiB, and exited before the
+          # find ever ran -- leaving "is the model gone?" unanswered by the
+          # one check that could actually answer it.
 
-          # Anti-vacuous floor first: a parse failure yielding an empty or
-          # non-numeric value (which would compare as 0) must never pass
-          # silently as "small enough".
-          if ! printf '%s' "$size_bytes" | grep -qE '^[0-9]+$' || [ "$size_bytes" -lt 104857600 ]; then
-            echo "::error::Could not read a plausible image size (got: '$size_bytes') -- the size gate is not covering the real image"
-            exit 1
-          fi
-
-          # Ceiling: the image without a model is expected around 350 MiB,
-          # and today's image with ggml-small baked in is around 840 MiB, so
-          # 600 MiB sits far from both edges and can only trip if a
-          # model-sized blob returns.
-          if [ "$size_bytes" -ge 629145600 ]; then
-            echo "::error::Image is ${size_mib} MiB, at or above the 600 MiB ceiling -- a model-sized blob may have re-entered the image"
-            exit 1
-          fi
-          echo "OK: image size ${size_mib} MiB is below the 600 MiB ceiling"
-
-          # Structural gate: the precise one. ggml-*.bin (not *.bin) so a
-          # data file inside node_modules can never produce a false
-          # positive.
+          # Structural gate: ggml-*.bin (not *.bin) so a data file inside
+          # node_modules can never produce a false positive.
           found="$(docker run --rm --entrypoint sh bun-ai-api:ci -c 'find /app /models -name "ggml-*.bin" -type f 2>/dev/null' || true)"
           if [ -n "$found" ]; then
             echo "::error::Found whisper model file(s) baked into the image:"
@@ -292,6 +276,40 @@ jobs:
           fi
 
           echo "OK: no ggml-*.bin anywhere in the image, find probe confirmed working"
+
+          # Coarse tripwire, deliberately generous. It exists only to catch a
+          # model-sized blob sneaking back in through a path the find above
+          # does not cover (a differently-named model file, a stray copy
+          # outside /app and /models). It is NOT a size-optimisation budget --
+          # a base-image or ffmpeg update legitimately moves this number, and
+          # a gate that fails on ordinary drift gets muted, which is worse
+          # than no gate.
+          #
+          # No leading $ on the braces below -- {{.Size}} is Go template
+          # syntax for `docker image inspect`, not a GitHub expression.
+          size_bytes="$(docker image inspect bun-ai-api:ci --format '{{.Size}}')"
+          size_mib="$(( size_bytes / 1024 / 1024 ))"
+          echo "Image size: ${size_bytes} bytes (~${size_mib} MiB)"
+
+          # Anti-vacuous floor: a parse failure yielding an empty or
+          # non-numeric value (which would compare as 0) must never pass
+          # silently as "small enough".
+          if ! printf '%s' "$size_bytes" | grep -qE '^[0-9]+$' || [ "$size_bytes" -lt 104857600 ]; then
+            echo "::error::Could not read a plausible image size (got: '$size_bytes') -- the size gate is not covering the real image"
+            exit 1
+          fi
+
+          # Measured on run 30136048728: 709 MiB with the model already out of
+          # the image. That is the real baseline -- the pre-existing "~350 MiB
+          # expected" figure was an estimate that ignored the uncompressed
+          # Debian base (~250 MiB) plus ffmpeg's dependency tree. ggml-small
+          # is 466 MiB, so any re-entry lands near 1175 MiB; a 900 MiB ceiling
+          # sits clear of normal drift and still trips well before that.
+          if [ "$size_bytes" -ge 943718400 ]; then
+            echo "::error::Image is ${size_mib} MiB, at or above the 900 MiB ceiling -- a model-sized blob may have re-entered the image through a path the find gate does not cover"
+            exit 1
+          fi
+          echo "OK: image size ${size_mib} MiB is below the 900 MiB ceiling"
 
       # The only step here that can hang: without a timeout a wedged container
       # burns runner minutes until the 6-hour job default. This step starts the
